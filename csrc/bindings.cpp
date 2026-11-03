@@ -886,7 +886,7 @@ PYBIND11_MODULE(_ropesim, m) {
         // [N, V] (or [V] for every rope) of kinematic vertices; default = each root.
         .def_static("from_positions",
              [](farray pos, float density, float k_stretch, float k_bend, float max_h, int num_itr,
-                bool fix_root_orientation, py::object pinned) {
+                bool fix_root_orientation, py::object pinned, bool straight_rest) {
                  if (pos.ndim() != 3 || pos.shape(2) != 3 || pos.shape(1) < 3)
                      throw py::value_error("positions must be [num_envs, V>=3, 3]");
                  const int N = (int)pos.shape(0), V = (int)pos.shape(1);
@@ -921,10 +921,13 @@ PYBIND11_MODULE(_ropesim, m) {
                  float dir3[3] = {1.f, 0.f, 0.f};
                  return std::unique_ptr<RopeBatch>(new RopeBatch(N, V, 0.f, roots.data(), dir3, density, k_stretch,
                                                                  k_bend, max_h, num_itr, fix_root_orientation, pos.data(),
-                                                                 pin.data()));
+                                                                 pin.data(), straight_rest));
              }, py::arg("positions"), py::arg("density"), py::arg("k_stretch"), py::arg("k_bend"),
              py::arg("max_h"), py::arg("num_itr"), py::arg("fix_root_orientation") = false,
-             py::arg("pinned") = py::none())
+             py::arg("pinned") = py::none(), py::arg("straight_rest") = false,
+             "Build N ropes from vertex positions [N, V, 3]. The given geometry is also the rest shape unless "
+             "straight_rest=True, which makes the rest shape a straight, untwisted rope (use it for ropes that "
+             "start folded, draped or resting on the floor).")
         // Rope-rope contact: YarnBall's barrier/friction/step-limit model, fed by a
         // per-group brute-force detector. Contact starts at centreline distance
         // 2*radius + barrier (use radius 0.9 R, barrier 0.2 R for a rope of radius R).

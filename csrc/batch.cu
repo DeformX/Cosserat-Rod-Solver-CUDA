@@ -194,7 +194,7 @@ RopeBatch::RopeBatch(int num_envs, int verts_per_rope, float seg_len,
                      const float* root_pos_host, const float* dir3,
                      float density, float k_stretch, float k_bend,
                      float max_h, int num_itr, bool fix_root_orientation,
-                     const float* init_pos_host, const uint8_t* pinned_host)
+                     const float* init_pos_host, const uint8_t* pinned_host, bool straight_rest)
     : sdf(num_envs) {
     N = num_envs;
     V = verts_per_rope;
@@ -238,6 +238,13 @@ RopeBatch::RopeBatch(int num_envs, int verts_per_rope, float seg_len,
     sim->meta.barrierThickness = 0.08f * minSeg;
 
     sim->configure(density);
+    // configure() makes the initial geometry the rest shape (rest frames = the relative
+    // rotation between adjacent segments). With straight_rest the rest shape is a straight,
+    // untwisted rope whatever the initial geometry: identity rest rotations, which
+    // setKBend() then scales to the bending stiffness.
+    if (straight_rest)
+        for (int e = 0; e < N; e++)
+            for (int v = 0; v + 1 < V; v++) sim->qRests[e * V + v] = glm::vec4(0.f, 0.f, 0.f, 1.f);
     sim->setKStretch(k_stretch);
     sim->setKBend(k_bend);
     sim->maxH = max_h;

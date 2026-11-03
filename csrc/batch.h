@@ -36,7 +36,8 @@ public:
               float density, float k_stretch, float k_bend,
               float max_h, int num_itr, bool fix_root_orientation,
               const float* init_pos_host = nullptr,    // optional [N*V*3] initial shape
-              const uint8_t* pinned_host = nullptr);   // optional [N*V] pins (default: each root)
+              const uint8_t* pinned_host = nullptr,
+              bool straight_rest = false);   // optional [N*V] pins (default: each root)
     ~RopeBatch();
     RopeBatch(const RopeBatch&) = delete;
     RopeBatch& operator=(const RopeBatch&) = delete;
