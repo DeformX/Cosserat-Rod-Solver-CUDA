@@ -73,6 +73,23 @@ Added at vendoring time (this repo only):
    skips a pair whose centrelines coincide exactly (the contact normal was 0/0 =
    NaN). Rope-rope candidates now come from `csrc/batch.cu` (`bruteDetectK`, a
    per-group detector); YarnBall's LBVH detector is unchanged but unused by ropesim.
+10. Rod-mesh contact (2026-10-12): `YarnBall/YarnBall.h` (MetaData: `SdfGrid`, `SdfPose`,
+   `numSdf`, `sdf[kMaxSdf]` (8 then, 32 since patch 11), `d_sdfPoses`, `sdfEnvVerts`), `YarnBall/YarnBall.cu` (defaults: no
+   meshes), `YarnBall/sim/cosserat.cu` (`planeContact()` split into the shared
+   `surfaceContact()` + the plane loop, new `sdfSample()` / `sdfContact()` and its call next to
+   `planeContact` in `cosseratItr`'s sector-0 block). Grids and poses live in
+   `csrc/sdf.h` (ropesim). `numSdf == 0` (default) never calls it.
+11. Kinematic meshes + contact-force readout (2026-10-12): the contact device code moved to
+   `YarnBall/sim/contact.cuh` (`surfaceContact`, `sdfSample`, `sdfContactAt`, `surfacesAt`,
+   `surfaceReadout`); `YarnBall/YarnBall.h` (MetaData: `SdfPose` gains `vel`/`omega`,
+   `SdfMotion`, `d_sdfMotion`, `sdfMoving`, `sdfEnvs`, `sdfForces`, `d_contactForce`,
+   `d_sdfWrench`, `kMaxSdf = 32`, `kMaxSdfCand`, `d_sdfCand`, `d_sdfNumCand`, per-mesh `muS`/`muK`
+   in `SdfGrid`; `startIterate(sub, nSub)`), `YarnBall/YarnBall.cu` (defaults),
+   `YarnBall/sim/step.cpp` (`advance()` passes the substep index), `YarnBall/sim/iteration.cu`
+   (`initItr(data, sub, nSub)` writes the interpolated pose + world AABB of each (env, mesh) while
+   `sdfMoving`; `endItr` runs the force readout while `sdfForces` and rebuilds each vertex's
+   broad-phase candidate list whenever `numSdf > 0`). The flags default to 0 and `numSdf` to 0:
+   the legacy arithmetic is unchanged (bitwise, checked).
 
 ## Updating
 
@@ -82,7 +99,11 @@ re-copy changed files, and re-apply patches 5-6: patch 5 = ONE hunk in
 (ropesim vendoring)" — missing any of the `YarnBall.cu` hunks breaks the
 headless compile (`Kitten::Mesh`/`ComputeBuffer` are forward-declared only);
 patch 6 = ONE hunk each in `YarnBall.h`, `YarnBall.cu`, and
-`sim/iteration.cu`, marked "Local patch (ropesim)". Patches 7-9 are marked
+`sim/iteration.cu`, marked "Local patch (ropesim)". Patches 7-10 are marked
 "Local patch (ropesim)" too: 7 = one hunk each in `YarnBall.h`/`YarnBall.cu` plus
 the `planeContact()` function and its call in `sim/cosserat.cu`; 8 = two hunks in
-`configure()` (`YarnBall.cu`); 9 = one hunk in `sim/cosserat.cu`.
+`configure()` (`YarnBall.cu`); 9 = one hunk in `sim/cosserat.cu`; 10 = one hunk each
+in `YarnBall.h`/`YarnBall.cu` plus `surfaceContact()`/`sdfSample()`/`sdfContact()`
+and one call in `sim/cosserat.cu`; 11 = one hunk each in `YarnBall.h`/`YarnBall.cu`/`sim/step.cpp`,
+two in `sim/iteration.cu`, the include + one call in `sim/cosserat.cu`, and the new
+`sim/contact.cuh`.

@@ -23,6 +23,7 @@
 #include <mutex>
 
 #include "YarnBall/YarnBall.h"
+#include "sdf.h"
 
 namespace ropesim {
 
@@ -105,6 +106,10 @@ public:
     void step_free(float dt, int substeps);
     bool ropeContact = false;
     int groupVerts = 0;
+    // Rod-mesh contact: SDF grids, per-env poses + frame motion, force readout
+    // (bindings publish them to meta; every step path brackets its substeps
+    // with sdf.begin_step / end_step).
+    SdfStore sdf;
 
 private:
     void gather_nolock();

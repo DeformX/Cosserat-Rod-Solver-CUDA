@@ -21,6 +21,10 @@ namespace YarnBall {
 		meta.contactRadius = 0.f; meta.contactKappa = 2.f;
 		meta.contactMuS = meta.contactMuK = 0.f;
 		meta.contactVSlip = 1e-3f;
+		meta.numSdf = 0; meta.d_sdfPoses = nullptr; meta.sdfEnvVerts = 1;	// Local patch (ropesim): no meshes
+		meta.d_sdfMotion = nullptr; meta.sdfMoving = 0; meta.sdfEnvs = 1;
+		meta.sdfForces = 0; meta.d_contactForce = nullptr; meta.d_sdfWrench = nullptr;
+		meta.d_sdfCand = nullptr; meta.d_sdfNumCand = nullptr;
 		meta.damping = 1e-6;
 		meta.time = 0.f;
 

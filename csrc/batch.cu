@@ -64,8 +64,8 @@ public:
     // ropeContact is false. With ropeContact, rope-rope candidates come from
     // the per-group brute-force detector (bruteDetectK) instead of YarnBall's
     // LBVH, which syncs the host every detection and knows nothing of envs.
-    static void substep(Sim* s, bool ropeContact = false, int groupVerts = 0, int ropeVerts = 0) {
-        s->startIterate();
+    static void substep(Sim* s, bool ropeContact, int groupVerts, int ropeVerts, int sub, int nSub) {
+        s->startIterate(sub, nSub);   // substep index: kinematic mesh poses are interpolated on it
         if (ropeContact)
             bruteDetectK<<<(s->meta.numVerts + 127) / 128, 128, 0, s->stream>>>(s->d_meta, groupVerts, ropeVerts, s->d_error);
         cudaGraphLaunch(s->stepGraph, s->stream);
@@ -194,7 +194,8 @@ RopeBatch::RopeBatch(int num_envs, int verts_per_rope, float seg_len,
                      const float* root_pos_host, const float* dir3,
                      float density, float k_stretch, float k_bend,
                      float max_h, int num_itr, bool fix_root_orientation,
-                     const float* init_pos_host, const uint8_t* pinned_host) {
+                     const float* init_pos_host, const uint8_t* pinned_host)
+    : sdf(num_envs) {
     N = num_envs;
     V = verts_per_rope;
     fixRootOrientation_ = fix_root_orientation;
@@ -284,12 +285,14 @@ void RopeBatch::step(const float* d_root_pos, const float* d_root_vel,
     applyRootsK<<<(N + 127) / 128, 128, 0, s>>>(
         sim->meta.d_verts, sim->meta.d_vels, sim->meta.d_qs,
         d_root_pos, d_root_vel, d_root_q, N, V);
+    sdf.begin_step(sim->meta, s);
 
     if (ropeContact) {   // same substeps as advance(), plus rope-rope detection
         YarnBall::SimAccess::prepare(sim.get(), dt / substeps);
         for (int i = 0; i < substeps; i++)
-            YarnBall::SimAccess::substep(sim.get(), true, groupVerts, V);
+            YarnBall::SimAccess::substep(sim.get(), true, groupVerts, V, i, substeps);
         YarnBall::SimAccess::finish(sim.get(), dt);
+        sdf.end_step(substeps, sim->solverStream());
         gather_nolock();
         return;
     }
@@ -303,6 +306,7 @@ void RopeBatch::step(const float* d_root_pos, const float* d_root_vel,
         throw;
     }
     sim->maxH = oldMaxH;
+    sdf.end_step(substeps, sim->solverStream());
 
     gather_nolock();
 }
@@ -335,6 +339,7 @@ void RopeBatch::step_program(const float* d_p0, const float* d_v0,
                                         cudaMemcpyDeviceToDevice, s));
 
     const float h = dt / substeps;  // exact; we run the loop ourselves
+    sdf.begin_step(sim->meta, s);
     YarnBall::SimAccess::prepare(sim.get(), h);
     const int blocks = (N + 127) / 128;
     for (int i = 0; i < substeps; i++) {
@@ -342,9 +347,10 @@ void RopeBatch::step_program(const float* d_p0, const float* d_v0,
             sim->meta.d_verts, sim->meta.d_vels, sim->meta.d_qs,
             P0, V0, P1, d_q0 ? Q0 : nullptr, d_q1 ? Q1 : nullptr,
             i, substeps, h, dt, N, V);
-        YarnBall::SimAccess::substep(sim.get(), ropeContact, groupVerts, V);
+        YarnBall::SimAccess::substep(sim.get(), ropeContact, groupVerts, V, i, substeps);
     }
     YarnBall::SimAccess::finish(sim.get(), dt);
+    sdf.end_step(substeps, sim->solverStream());
 
     gather_nolock();
 }
@@ -375,10 +381,12 @@ void RopeBatch::set_rope_contact(bool enabled, float radius, float barrier, floa
 void RopeBatch::step_free(float dt, int substeps) {
     std::lock_guard<std::mutex> g(mtx_);
     const float h = dt / substeps;
+    sdf.begin_step(sim->meta, sim->solverStream());
     YarnBall::SimAccess::prepare(sim.get(), h);
     for (int i = 0; i < substeps; i++)
-        YarnBall::SimAccess::substep(sim.get(), ropeContact, groupVerts, V);
+        YarnBall::SimAccess::substep(sim.get(), ropeContact, groupVerts, V, i, substeps);
     YarnBall::SimAccess::finish(sim.get(), dt);
+    sdf.end_step(substeps, sim->solverStream());
     gather_nolock();
 }
 

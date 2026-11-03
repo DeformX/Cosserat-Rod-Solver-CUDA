@@ -9,8 +9,14 @@
              ordering is what synchronizes solver and consumer), and keep the
              RopeBatch object alive while views are in use.
 
+- ropesim.sdf:          signed-distance grids for rod-mesh contact (bake_mesh needs
+                        Warp: pip extra `bake`; closed forms need only numpy).
+- ropesim.isaac_bridge: Isaac Lab bridge (PhysX bodies -> rope colliders, rope
+                        wrench -> PhysX); imports Kit lazily.
+
 Units everywhere: density=rho [kg/m], k_stretch=EA [N], k_bend=EI [N*m^2] (>0).
 """
+from . import sdf  # noqa: F401
 from ._ropesim import CudaView, RopeBatch, RopeSim  # noqa: F401
 
-__all__ = ["RopeSim", "RopeBatch", "CudaView"]
+__all__ = ["RopeSim", "RopeBatch", "CudaView", "sdf"]

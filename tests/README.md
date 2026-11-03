@@ -9,6 +9,20 @@ bash scripts/run_tests.sh             # full suite
 bash scripts/run_tests.sh -m 'not slow'
 ```
 
+## Contact tests (2026-10)
+
+| file | what | needs |
+|---|---|---|
+| `test_contact.py` | rod–plane and rope–rope contact (AGENTS §5b) | torch |
+| `test_mesh_contact.py` | rod–mesh contact on signed-distance grids: box ≡ plane, posed incline, capstan, drape, thin wall, baked vs closed form, per-env poses, API | torch; one test skips without `warp` + `trimesh` |
+| `test_mesh_motion.py` | kinematic (moving) meshes: interpolation, moving-surface friction, teleport, force readout | torch |
+| `test_mesh_broadphase.py` | 32 meshes, candidate lists, per-mesh friction, CUDA-tensor targets, device views, review-3 regressions | torch |
+| `test_isaac_bridge_geometry.py` | the Kit-free half of the Isaac bridge: tessellated primitives, welding, shells, fillets | warp (skips otherwise) |
+
+The Isaac Lab half of the bridge has no pytest (one Kit per process, minutes to start); its
+integration checks are the scripts `scripts/isaac_bridge_demo.py` (momentum balance, dragged box,
+rolled cylinder) and `scripts/isaac_swing_compare.py` (the swing env with and without contact).
+
 ## Why analytic tests instead of an OBJ-diff against the original `Gui`
 
 The integration **wraps the identical compiled kernels** — an output-diff

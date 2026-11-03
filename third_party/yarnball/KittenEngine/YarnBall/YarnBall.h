@@ -130,6 +130,46 @@ namespace YarnBall {
 		float contactMuS;	// static friction coefficient
 		float contactMuK;	// kinetic friction coefficient
 		float contactVSlip;	// slip speed threshold [m/s] (> 0)
+		// Local patch (ropesim): rod-mesh contact through signed-distance grids.
+		// sdf[m].v holds phi on an (nx, ny, nz) node lattice (C order, i slowest)
+		// at origin + (i, j, k) / invH in the object's own frame; the object's pose
+		// per env is d_sdfPoses[env * 8 + m] (x_world = q * p + pos), env =
+		// vertex / sdfEnvVerts. Contact when phi(x) < contactRadius, with the
+		// plane term (normal = grad phi). numSdf == 0 (default) skips it.
+		struct SdfGrid { const float* v; int nx, ny, nz; vec3 origin; float h, invH; float muS, muK; };	// + its own friction
+		// Pose of (env, mesh) at the END of the current substep plus the object's
+		// velocity over it (vel of the origin, omega: world frame). The material
+		// point under a vertex moves h * (vel + omega x (x - pos)) this substep;
+		// friction acts on the vertex displacement relative to that (sdfMoving).
+		// lo/hi: world AABB of the lattice at that pose (broad phase).
+		struct SdfPose { vec3 pos; vec4 q; vec3 vel; vec3 omega; vec3 lo, hi; };
+		// One frame of kinematic motion: from (p0, q0) at the frame start to
+		// p0 + dp, exp(rot) * q0 at its end (rot = rotation vector of q1 q0^-1 in
+		// the world frame, shortest arc). While sdfMoving != 0, initItr writes the
+		// SdfPose of substep s of S (pose at (s + 1) / S, constant velocity).
+		struct SdfMotion { vec3 p0; vec4 q0; vec3 dp; vec3 rot; };
+		enum { kMaxSdf = 32, kMaxSdfCand = 8 };	// MetaData is an unnamed struct: no static members
+		int numSdf;
+		SdfGrid sdf[kMaxSdf];
+		SdfPose* d_sdfPoses;			// [sdfEnvs * kMaxSdf]
+		const SdfMotion* d_sdfMotion;	// [sdfEnvs * kMaxSdf], read while sdfMoving
+		int sdfMoving;
+		int sdfEnvs;
+		int sdfEnvVerts;
+		// Broad phase: endItr lists, per vertex, the meshes of its env whose
+		// world AABB (padded by the vertex's next-substep travel) contains it;
+		// the Newton iterations and the readout visit only those. -1 = overflow
+		// (or a fresh frame): visit every mesh of the env.
+		int* d_sdfCand;					// [numVerts * kMaxSdfCand]
+		int* d_sdfNumCand;				// [numVerts]
+		// Contact-force readout (sdfForces != 0): endItr accumulates, per substep,
+		// the force every surface applied to each vertex (d_contactForce
+		// [numVerts], world) and the wrench the rope applied to each (env, mesh)
+		// about the mesh origin (d_sdfWrench [sdfEnvs * kMaxSdf * 2]: force,
+		// torque). The host zeroes them at the frame start and averages.
+		int sdfForces;
+		vec3* d_contactForce;
+		vec3* d_sdfWrench;
 		float frictionCoeff;	// Friction coefficient for contacts
 		float kCollision;		// Stiffness of the collision
 		float kFriction;		// Stiffness of the collision
@@ -244,7 +284,9 @@ namespace YarnBall {
 	private:
 		void uploadMeta();
 
-		void startIterate();
+		// Local patch (ropesim): substep index / count of the current frame
+		// (kinematic mesh poses are interpolated on them).
+		void startIterate(int sub = 0, int nSub = 1);
 		void endIterate();
 		void detectCollisions();
 		void iterateCosserat();

@@ -1,11 +1,36 @@
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
 #include "../YarnBall.h"
+#include "contact.cuh"
 
 namespace YarnBall {
-	// Converts velocity to initial guess
-	__global__ void initItr(MetaData* data) {
+	// Converts velocity to initial guess. Local patch (ropesim): substep sub of
+	// nSub of the current frame; while sdfMoving, threads < sdfEnvs * kMaxSdf
+	// also write the kinematic mesh pose of this substep (see MetaData::SdfMotion).
+	__global__ void initItr(MetaData* data, int sub, int nSub) {
 		const int tid = threadIdx.x + blockIdx.x * blockDim.x;
+		if (data->sdfMoving && tid < data->sdfEnvs * MetaData::kMaxSdf) {
+			if (tid % MetaData::kMaxSdf < data->numSdf) {
+				const MetaData::SdfMotion M = data->d_sdfMotion[tid];
+				const int m = tid % MetaData::kMaxSdf;
+				const float a = float(sub + 1) / float(nSub);
+				const float invDt = 1.f / (float(nSub) * data->h);
+				MetaData::SdfPose P;
+				const float th = length(M.rot);
+				if (th > 0.f || M.dp != vec3(0.f)) {
+					P.pos = M.p0 + a * M.dp;
+					const Kit::Rotor dq = th > 0.f ? Kit::Rotor::angleAxis(a * th, M.rot / th) : Kit::Rotor();
+					P.q = normalize((dq * Kit::Rotor(M.q0)).v);
+					P.vel = M.dp * invDt;
+					P.omega = M.rot * invDt;
+				} else {	// a target equal to the current pose: exactly the static pose (bitwise inert)
+					P.pos = M.p0; P.q = M.q0; P.vel = vec3(0.f); P.omega = vec3(0.f);
+				}
+				const MetaData::SdfGrid& g = data->sdf[m];
+				sdfWorldBox(g.origin, g.origin + vec3(float(g.nx - 1), float(g.ny - 1), float(g.nz - 1)) * g.h, P.pos, Kit::Rotor(P.q), P.lo, P.hi);
+				data->d_sdfPoses[tid] = P;
+			}
+		}
 		if (tid >= data->numVerts) return;
 
 		const float h = data->h;
@@ -43,8 +68,9 @@ namespace YarnBall {
 		data->d_lastPos[tid] = pos;
 	}
 
-	void Sim::startIterate() {
-		initItr << <(meta.numVerts + 255) / 256, 256, 0, stream >> > (d_meta);
+	void Sim::startIterate(int sub, int nSub) {
+		const int threads = max(meta.numVerts, meta.sdfMoving ? meta.sdfEnvs * (int)MetaData::kMaxSdf : 0);
+		initItr << <(threads + 255) / 256, 256, 0, stream >> > (d_meta, sub, nSub);
 	}
 
 	// Converts dx back to velocity and advects
@@ -84,8 +110,22 @@ namespace YarnBall {
 				v = vn + vt;
 			}
 			data->d_vels[tid] = v * (1 - data->drag * h);
+			// Local patch (ropesim): contact-force readout at the final configuration
+			if (data->sdfForces && (data->numPlanes > 0 || data->numSdf > 0)) {
+				const float kap = data->contactKappa / h;
+				surfaceReadout(data, tid / data->sdfEnvVerts, tid, verts[tid].pos, dx, kap * kap / verts[tid].invMass, h);
+			}
 		}
 		verts[tid].pos += dx;
+		// Local patch (ropesim): broad phase for the next substep (meshes whose
+		// padded world AABB holds the new position; pad = twice the travel of a
+		// substep at this velocity + 2 cm; pinned vertices never touch)
+		if (data->numSdf > 0) {
+			if (verts[tid].invMass != 0)
+				sdfBuildCandidates(data, tid, tid / data->sdfEnvVerts, verts[tid].pos, 2.f * length(dx) + 0.02f, h);
+			else
+				data->d_sdfNumCand[tid] = 0;
+		}
 	}
 
 	void Sim::endIterate() {

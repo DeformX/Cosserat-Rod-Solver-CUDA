@@ -19,6 +19,7 @@
 #include <pybind11/numpy.h>
 #include <pybind11/stl.h>
 
+#include <algorithm>
 #include <cmath>
 #include <memory>
 #include <mutex>
@@ -27,6 +28,7 @@
 
 #include "YarnBall/YarnBall.h"
 #include "batch.h"
+#include "sdf.h"
 
 namespace py = pybind11;
 
@@ -44,6 +46,18 @@ glm::vec3 to_vec3(const farray& a, const char* name) {
 // Rod-plane contact (cosserat.cu planeContact). planes: [P<=8, 4] rows
 // (nx, ny, nz, w) = half-spaces n.x >= w; P = 0 turns contact off. Every row is
 // validated before anything is written, so a bad call leaves the old state.
+// Surface-contact material (shared by planes and meshes): rope radius, static /
+// kinetic friction, slip speed, stiffness factor kappa (k_i = m_i (kappa/h)^2).
+void write_contact(YarnBall::MetaData& m, float radius, float mu_s, float mu_k, float v_slip, float kappa) {
+    if (!(radius > 0) || !(kappa > 0) || !(mu_s >= 0) || !(mu_k >= 0) || !(v_slip > 0))
+        throw py::value_error("surface contact needs radius > 0, kappa > 0, mu_s >= 0, mu_k >= 0, v_slip > 0");
+    m.contactRadius = radius; m.contactMuS = mu_s; m.contactMuK = mu_k;
+    m.contactVSlip = v_slip; m.contactKappa = kappa;
+}
+
+// set_planes(planes, radius, ...): the planes plus the shared material (sugar for
+// set_contact); with P > 0 the material is validated and written, with P == 0 only
+// the planes are switched off and the material (meshes may be using it) is kept.
 void write_planes(YarnBall::MetaData& m, const farray& planes, float radius, float mu_s,
                   float mu_k, float v_slip, float kappa) {
     if (planes.ndim() != 2 || planes.shape(1) != 4 || planes.shape(0) > 8)
@@ -62,12 +76,115 @@ void write_planes(YarnBall::MetaData& m, const farray& planes, float radius, flo
     }
     for (int i = 0; i < P; i++) m.planes[i] = rows[i];
     m.numPlanes = P;
-    m.contactRadius = radius; m.contactMuS = mu_s; m.contactMuK = mu_k;
-    m.contactVSlip = v_slip; m.contactKappa = kappa;
+    if (P > 0) write_contact(m, radius, mu_s, mu_k, v_slip, kappa);   // an empty list only turns planes off
+}
+
+// Rod-mesh contact (sdf.h, cosserat.cu sdfContact). values [nx, ny, nz] float32
+// signed distances on a node lattice at origin + (i, j, k) * spacing (object frame).
+struct GridArgs { const float* v; int nx, ny, nz; glm::vec3 origin; float spacing; };
+GridArgs parse_grid(const farray& values, const farray& origin, float spacing) {
+    if (values.ndim() != 3 || values.shape(0) < 2 || values.shape(1) < 2 || values.shape(2) < 2)
+        throw py::value_error("sdf values must be [nx, ny, nz] with every dim >= 2");
+    if (!(spacing > 0) || !std::isfinite(spacing)) throw py::value_error("sdf spacing must be > 0");
+    const float* v = values.data();
+    for (py::ssize_t i = 0; i < values.size(); i++)
+        if (!std::isfinite(v[i])) throw py::value_error("sdf values must be finite");
+    return GridArgs{v, (int)values.shape(0), (int)values.shape(1), (int)values.shape(2), to_vec3(origin, "origin"), spacing};
+}
+// Host pose rows: finite positions, finite nonzero quaternions (checked before any device state changes).
+void validate_rows(const float* p, const float* q, int rows, const char* who) {
+    for (int r = 0; r < rows; r++) {
+        const float l = std::sqrt(q[4 * r] * q[4 * r] + q[4 * r + 1] * q[4 * r + 1] + q[4 * r + 2] * q[4 * r + 2] + q[4 * r + 3] * q[4 * r + 3]);
+        if (!std::isfinite(l) || !(l > 1e-6f)) throw py::value_error(std::string(who) + ": quat must be finite with nonzero norm");
+        if (!std::isfinite(p[3 * r]) || !std::isfinite(p[3 * r + 1]) || !std::isfinite(p[3 * r + 2]))
+            throw py::value_error(std::string(who) + ": pos must be finite");
+    }
+}
+// pos [3] or [rows, 3]; quat [4] or [rows, 4] (x, y, z, w). Returns the row count (1 or N).
+int parse_poses(const farray& pos, const farray& quat, int N, const char* who) {
+    const bool p1 = pos.ndim() == 1 && pos.shape(0) == 3, pN = pos.ndim() == 2 && pos.shape(0) == N && pos.shape(1) == 3;
+    const bool q1 = quat.ndim() == 1 && quat.shape(0) == 4, qN = quat.ndim() == 2 && quat.shape(0) == N && quat.shape(1) == 4;
+    if (!((p1 && q1) || (pN && qN)))
+        throw py::value_error(std::string(who) + ": pos must be [3] and quat [4] (x, y, z, w), or [num_envs, 3] and [num_envs, 4]");
+    const int rows = p1 ? 1 : N;
+    validate_rows(pos.data(), quat.data(), rows, who);
+    return rows;
+}
+// Parsed view of a device array handed to us by torch/cupy/numba.
+struct CaiArray {
+    uintptr_t ptr = 0;
+};
+CaiArray parse_cai(const py::object& obj, std::vector<py::ssize_t> want, const char* name);
+// Pose rows for set_mesh_poses/add_mesh: host numpy ([3]/[4] or [N,3]/[N,4]) or
+// CUDA arrays ([N,3]/[N,4] float32, e.g. torch on cuda). Host arrays are
+// validated here; device arrays are normalized on the device.
+struct PoseRows {
+    bool device = false;
+    int rows = 1;
+    const float* pos = nullptr;   // host or device pointer
+    const float* quat = nullptr;
+    farray hp, hq;                // keep host conversions alive
+};
+PoseRows parse_pose_rows(const py::object& pos, const py::object& quat, int N, const char* who) {
+    PoseRows r;
+    const bool dp = py::hasattr(pos, "__cuda_array_interface__"), dq = py::hasattr(quat, "__cuda_array_interface__");
+    if (dp != dq) throw py::value_error(std::string(who) + ": pos and quat must both be host arrays or both CUDA arrays");
+    if (dp) {
+        r.device = true; r.rows = N;
+        r.pos = reinterpret_cast<const float*>(parse_cai(pos, {N, 3}, "pos").ptr);
+        r.quat = reinterpret_cast<const float*>(parse_cai(quat, {N, 4}, "quat").ptr);
+        return r;
+    }
+    r.hp = farray::ensure(pos); r.hq = farray::ensure(quat);
+    if (!r.hp || !r.hq) throw py::value_error(std::string(who) + ": pos/quat must be arrays");
+    r.rows = parse_poses(r.hp, r.hq, N, who);
+    r.pos = r.hp.data(); r.quat = r.hq.data();
+    return r;
+}
+// teleport: False/True for every env, a [num_envs] host bool array, or a [num_envs] CUDA bool array.
+struct TeleFlags {
+    bool all = false;
+    bool device = false;
+    const uint8_t* ptr = nullptr;
+    std::vector<uint8_t> host;
+};
+TeleFlags parse_teleport(const py::object& teleport, int N, const char* who) {
+    TeleFlags t;
+    if (py::isinstance<py::bool_>(teleport)) { t.all = teleport.cast<bool>(); return t; }
+    if (py::hasattr(teleport, "__cuda_array_interface__")) {
+        py::dict d = teleport.attr("__cuda_array_interface__").cast<py::dict>();
+        const auto ts = d["typestr"].cast<std::string>();
+        auto shape = d["shape"].cast<std::vector<py::ssize_t>>();
+        py::object st = d.attr("get")("strides", py::none());
+        const bool contiguous = st.is_none() || N == 1 || st.cast<std::vector<py::ssize_t>>() == std::vector<py::ssize_t>{1};
+        if ((ts != "|b1" && ts != "|u1") || shape != std::vector<py::ssize_t>{N} || !contiguous)
+            throw py::value_error(std::string(who) + ": teleport must be a bool, a [num_envs] bool array, or a contiguous [num_envs] CUDA bool array");
+        t.device = true; t.ptr = reinterpret_cast<const uint8_t*>(d["data"].cast<py::tuple>()[0].cast<uintptr_t>());
+        return t;
+    }
+    auto a = py::array_t<bool, py::array::c_style | py::array::forcecast>::ensure(teleport);
+    if (!a || a.ndim() != 1 || a.shape(0) != N)
+        throw py::value_error(std::string(who) + ": teleport must be a bool, a [num_envs] bool array, or a [num_envs] CUDA bool array");
+    t.host.resize(N);
+    for (int i = 0; i < N; i++) t.host[i] = a.data()[i] ? 1 : 0;
+    t.ptr = t.host.data();
+    return t;
+}
+// One entry point for both classes: rows + flags -> the store.
+void set_mesh_targets(SdfStore& sdf, int index, const PoseRows& r, const TeleFlags& t, cudaStream_t s, const char* who) {
+    if (r.device) sdf.set_targets(index, r.pos, r.quat, r.rows, t.device ? t.ptr : sdf.stage_flags(t.ptr, t.all, s), t.all, s);
+    else if (t.device) throw py::value_error(std::string(who) + ": host poses need teleport as a bool or a host bool array");
+    else sdf.set_targets_host(index, r.pos, r.quat, r.rows, t.all ? nullptr : t.ptr, t.all, s);
+}
+float mu_or(const py::object& mu, float dflt) { return mu.is_none() ? dflt : mu.cast<float>(); }
+void require_contact_radius(const YarnBall::MetaData& m) {
+    if (!(m.contactRadius > 0))
+        throw py::value_error("set the contact material first: set_contact(radius, ...) or set_planes(..., radius=)");
 }
 
 class RopeSim {
     std::unique_ptr<YarnBall::Sim> sim;  // RAII: ctor throws must not leak
+    SdfStore sdf_{1};
     int n = 0;
     bool collisions_ = false;
     bool fixRootOrientation_ = false;
@@ -156,7 +273,9 @@ public:
     // the contract the Isaac Lab step() will use.
     void advance(float dt, int substeps) {
         if (substeps < 0) throw py::value_error("substeps must be >= 0");
+        if (!(dt > 0)) return;                              // no substep runs: a pending mesh target stays pending (review 3)
         std::lock_guard<std::mutex> g(mtx_);
+        sdf_.begin_step(sim->meta, sim->solverStream());   // kinematic mesh motion / force readout
         if (substeps > 0) {
             const float oldMaxH = sim->maxH;
             // bias just above dt/substeps so ceil(dt/maxH) == substeps exactly
@@ -168,8 +287,10 @@ public:
                 throw;
             }
             sim->maxH = oldMaxH;
+            sdf_.end_step(substeps, sim->solverStream());
         } else {
             sim->advance(dt);
+            sdf_.end_step(dt > 0 ? std::max(1, (int)std::ceil(dt / sim->maxH)) : 1, sim->solverStream());
         }
     }
 
@@ -345,6 +466,62 @@ public:
         std::lock_guard<std::mutex> g(mtx_);
         write_planes(sim->meta, planes, radius, mu_s, mu_k, v_slip, kappa);
     }
+    void set_contact(float radius, float mu_s, float mu_k, float v_slip, float kappa) {
+        std::lock_guard<std::mutex> g(mtx_);
+        write_contact(sim->meta, radius, mu_s, mu_k, v_slip, kappa);
+    }
+    // --- rod-mesh contact: see sdf.h ------------------------------------------
+    int add_mesh(const farray& values, const farray& origin, float spacing, const farray& pos, const farray& quat,
+                 py::object mu_s, py::object mu_k) {
+        const GridArgs ga = parse_grid(values, origin, spacing);
+        parse_poses(pos, quat, 1, "add_mesh");
+        std::lock_guard<std::mutex> g(mtx_);
+        require_contact_radius(sim->meta);
+        const float ms = mu_or(mu_s, sim->meta.contactMuS), mk = mu_or(mu_k, mu_s.is_none() ? sim->meta.contactMuK : ms);
+        if (!(ms >= 0) || !(mk >= 0)) throw py::value_error("mu_s / mu_k must be >= 0");
+        const int idx = sdf_.add(ga.v, ga.nx, ga.ny, ga.nz, ga.origin, ga.spacing, ms, mk, pos.data(), quat.data(), 1,
+                                 sim->solverStream());
+        sdf_.write_meta(sim->meta, n);
+        return idx;
+    }
+    void set_mesh_friction(int index, float mu_s, py::object mu_k) {
+        if (!(mu_s >= 0)) throw py::value_error("mu_s must be >= 0");
+        const float mk = mu_or(mu_k, mu_s);
+        if (!(mk >= 0)) throw py::value_error("mu_k must be >= 0");
+        std::lock_guard<std::mutex> g(mtx_);
+        sdf_.set_friction(index, mu_s, mk);
+        sdf_.write_meta(sim->meta, n);
+    }
+    // teleport=False: the pose at the END of the next advance() (the mesh moves
+    // there over the substeps, friction relative to it); True: replaced now.
+    void set_mesh_pose(int index, const farray& pos, const farray& quat, bool teleport) {
+        parse_poses(pos, quat, 1, "set_mesh_pose");
+        std::lock_guard<std::mutex> g(mtx_);
+        sdf_.set_targets_host(index, pos.data(), quat.data(), 1, nullptr, teleport, sim->solverStream());
+    }
+    void clear_meshes() {
+        std::lock_guard<std::mutex> g(mtx_);
+        sdf_.clear();
+        sdf_.write_meta(sim->meta, n);
+    }
+    // Contact-force readout (planes + meshes), averaged over the last advance().
+    void enable_contact_forces(bool on) {
+        std::lock_guard<std::mutex> g(mtx_);
+        sdf_.enable_forces(on);
+        sdf_.write_meta(sim->meta, n);
+    }
+    py::array_t<float> contact_forces() const {   // [V, 3]: force ON each vertex
+        std::lock_guard<std::mutex> g(mtx_);
+        py::array_t<float> out({n, 3});
+        sdf_.contact_forces(out.mutable_data());
+        return out;
+    }
+    py::array_t<float> mesh_wrenches() const {    // [M, 6]: (force, torque about the mesh origin) BY the rope ON each mesh
+        std::lock_guard<std::mutex> g(mtx_);
+        py::array_t<float> out({sdf_.count(), 6});
+        sdf_.wrenches(out.mutable_data());
+        return out;
+    }
     // Make vertex 0 a free mass (uniform segments: m0 = m1/2). Test/scene helper.
     void unpin_root() {
         std::lock_guard<std::mutex> g(mtx_);
@@ -405,11 +582,6 @@ public:
 };
 
 // ---------------- zero-copy CUDA interop (__cuda_array_interface__) --------
-
-// Parsed view of a device array handed to us by torch/cupy/numba.
-struct CaiArray {
-    uintptr_t ptr = 0;
-};
 
 // Validate + extract a float32, C-contiguous CUDA array of exactly `want`.
 CaiArray parse_cai(const py::object& obj, std::vector<py::ssize_t> want,
@@ -500,6 +672,30 @@ PYBIND11_MODULE(_ropesim, m) {
              py::arg("planes"), py::arg("radius") = 0.f, py::arg("mu_s") = 0.5f, py::arg("mu_k") = py::none(),
              py::arg("v_slip") = 1e-3f, py::arg("kappa") = 2.f)
         .def("unpin_root", &RopeSim::unpin_root)
+        .def("set_contact",
+             [](RopeSim& s, float radius, float mu_s, py::object mu_k, float v_slip, float kappa) {
+                 s.set_contact(radius, mu_s, mu_k.is_none() ? mu_s : mu_k.cast<float>(), v_slip, kappa);
+             },
+             py::arg("radius"), py::arg("mu_s") = 0.5f, py::arg("mu_k") = py::none(),
+             py::arg("v_slip") = 1e-3f, py::arg("kappa") = 2.f,
+             "Surface contact material shared by planes and meshes: rope radius [m], static/kinetic friction, slip speed [m/s], stiffness factor kappa (k_i = m_i (kappa/h)^2).")
+        .def("add_mesh", &RopeSim::add_mesh, py::arg("values"), py::arg("origin"), py::arg("spacing"),
+             py::arg("pos") = farray(py::cast(std::vector<float>{0, 0, 0})),
+             py::arg("quat") = farray(py::cast(std::vector<float>{0, 0, 0, 1})),
+             py::arg("mu_s") = py::none(), py::arg("mu_k") = py::none(),
+             "Add a signed-distance grid (values [nx,ny,nz] float32 at origin + ijk*spacing in the object frame, negative inside; see ropesim.sdf) "
+             "posed at pos/quat (x,y,z,w). Friction defaults to the contact material's. Needs set_contact() first; at most 32 meshes. Returns the index.")
+        .def("set_mesh_friction", &RopeSim::set_mesh_friction, py::arg("index"), py::arg("mu_s"), py::arg("mu_k") = py::none(),
+             "Static / kinetic friction of one mesh (mu_k defaults to mu_s).")
+        .def("set_mesh_pose", &RopeSim::set_mesh_pose, py::arg("index"), py::arg("pos"), py::arg("quat"),
+             py::arg("teleport") = false,
+             "Pose the mesh reaches at the END of the next advance() (it moves there over the substeps; friction is relative to it). "
+             "teleport=True replaces the pose at once (resets). The last call before a step wins.")
+        .def("clear_meshes", &RopeSim::clear_meshes, "Remove every mesh (the material stays).")
+        .def("enable_contact_forces", &RopeSim::enable_contact_forces, py::arg("on") = true,
+             "Accumulate contact forces during advance(): contact_forces() and mesh_wrenches() become available.")
+        .def("contact_forces", &RopeSim::contact_forces, "[V,3] force ON each vertex from every surface, averaged over the last advance().")
+        .def("mesh_wrenches", &RopeSim::mesh_wrenches, "[M,6] force and torque (about the mesh origin, world frame) BY the rope ON each mesh, averaged over the last advance().")
         .def_property("drag", &RopeSim::get_drag, &RopeSim::set_drag)
         .def_property("drag_quad", &RopeSim::get_drag_quad, &RopeSim::set_drag_quad)
         .def_property("drag_quad_t", &RopeSim::get_drag_quad_t, &RopeSim::set_drag_quad_t)
@@ -774,6 +970,123 @@ PYBIND11_MODULE(_ropesim, m) {
              },
              py::arg("planes"), py::arg("radius") = 0.f, py::arg("mu_s") = 0.5f, py::arg("mu_k") = py::none(),
              py::arg("v_slip") = 1e-3f, py::arg("kappa") = 2.f)
+        .def("set_contact",
+             [](RopeBatch& b, float radius, float mu_s, py::object mu_k, float v_slip, float kappa) {
+                 std::lock_guard<std::mutex> g(b.mutex());
+                 write_contact(b.raw()->meta, radius, mu_s, mu_k.is_none() ? mu_s : mu_k.cast<float>(), v_slip, kappa);
+             },
+             py::arg("radius"), py::arg("mu_s") = 0.5f, py::arg("mu_k") = py::none(),
+             py::arg("v_slip") = 1e-3f, py::arg("kappa") = 2.f)
+        // Rod-mesh contact (sdf.h): one SDF grid per mesh, posed per env.
+        .def("add_mesh",
+             [](RopeBatch& b, farray values, farray origin, float spacing, farray pos, farray quat, py::object mu_s, py::object mu_k) {
+                 const GridArgs ga = parse_grid(values, origin, spacing);
+                 const int rows = parse_poses(pos, quat, b.num_envs(), "add_mesh");
+                 std::lock_guard<std::mutex> g(b.mutex());
+                 auto& m = b.raw()->meta;
+                 require_contact_radius(m);
+                 const float ms = mu_or(mu_s, m.contactMuS), mk = mu_or(mu_k, mu_s.is_none() ? m.contactMuK : ms);
+                 if (!(ms >= 0) || !(mk >= 0)) throw py::value_error("mu_s / mu_k must be >= 0");
+                 const int idx = b.sdf.add(ga.v, ga.nx, ga.ny, ga.nz, ga.origin, ga.spacing, ms, mk, pos.data(), quat.data(), rows,
+                                           b.raw()->solverStream());
+                 b.sdf.write_meta(m, b.verts_per_rope());
+                 return idx;
+             },
+             py::arg("values"), py::arg("origin"), py::arg("spacing"),
+             py::arg("pos") = farray(py::cast(std::vector<float>{0, 0, 0})),
+             py::arg("quat") = farray(py::cast(std::vector<float>{0, 0, 0, 1})),
+             py::arg("mu_s") = py::none(), py::arg("mu_k") = py::none(),
+             "Add a signed-distance grid (values [nx,ny,nz] float32 at origin + ijk*spacing in the object frame, negative inside; see ropesim.sdf) "
+             "posed at pos/quat (x,y,z,w; [3]/[4] for every env or [N,3]/[N,4] per env). Friction defaults to the contact material's. "
+             "Needs set_contact() first; at most 32 meshes. Returns the index.")
+        .def("set_mesh_friction",
+             [](RopeBatch& b, int index, float mu_s, py::object mu_k) {
+                 if (!(mu_s >= 0)) throw py::value_error("mu_s must be >= 0");
+                 const float mk = mu_or(mu_k, mu_s);
+                 if (!(mk >= 0)) throw py::value_error("mu_k must be >= 0");
+                 std::lock_guard<std::mutex> g(b.mutex());
+                 b.sdf.set_friction(index, mu_s, mk);
+                 b.sdf.write_meta(b.raw()->meta, b.verts_per_rope());
+             }, py::arg("index"), py::arg("mu_s"), py::arg("mu_k") = py::none(), "Static / kinetic friction of one mesh (mu_k defaults to mu_s).")
+        // teleport=False: the pose each env's mesh will have at the END of the next
+        // step (it moves there over the substeps; friction is relative to it);
+        // True / [N] bool (host or CUDA): replaced now (resets). pos/quat: host
+        // [3]/[4] or [N,3]/[N,4], or CUDA float32 [N,3]/[N,4] (no host round trip).
+        .def("set_mesh_poses",
+             [](RopeBatch& b, int index, py::object pos, py::object quat, py::object teleport) {
+                 const PoseRows r = parse_pose_rows(pos, quat, b.num_envs(), "set_mesh_poses");
+                 const TeleFlags t = parse_teleport(teleport, b.num_envs(), "set_mesh_poses");
+                 std::lock_guard<std::mutex> g(b.mutex());
+                 set_mesh_targets(b.sdf, index, r, t, b.raw()->solverStream(), "set_mesh_poses");
+             }, py::arg("index"), py::arg("pos"), py::arg("quat"), py::arg("teleport") = false,
+             "Pose of one mesh at the END of the next step, per env or shared (host [3]/[4], [N,3]/[N,4] or CUDA [N,3]/[N,4] float32); "
+             "teleport: bool, [N] bool array or CUDA bool array replaces the pose at once (resets). The last call before a step wins.")
+        // Every mesh at once: pos [N, M, 3], quat [N, M, 4] (M = the mesh count; host or
+        // CUDA float32), teleport as in set_mesh_poses. One call per frame for the Isaac bridge.
+        .def("set_mesh_poses_all",
+             [](RopeBatch& b, py::object pos, py::object quat, py::object teleport) {
+                 const int N = b.num_envs(), M = b.sdf.count();
+                 const TeleFlags t = parse_teleport(teleport, N, "set_mesh_poses_all");
+                 const bool dp = py::hasattr(pos, "__cuda_array_interface__"), dq = py::hasattr(quat, "__cuda_array_interface__");
+                 if (dp != dq) throw py::value_error("set_mesh_poses_all: pos and quat must both be host arrays or both CUDA arrays");
+                 PoseRows r;
+                 if (dp) {
+                     r.device = true; r.rows = N * M;
+                     r.pos = reinterpret_cast<const float*>(parse_cai(pos, {N, M, 3}, "pos").ptr);
+                     r.quat = reinterpret_cast<const float*>(parse_cai(quat, {N, M, 4}, "quat").ptr);
+                 } else {
+                     r.hp = farray::ensure(pos); r.hq = farray::ensure(quat);
+                     if (!r.hp || !r.hq || r.hp.ndim() != 3 || r.hq.ndim() != 3 || r.hp.shape(0) != N || r.hq.shape(0) != N ||
+                         r.hp.shape(1) != M || r.hq.shape(1) != M || r.hp.shape(2) != 3 || r.hq.shape(2) != 4)
+                         throw py::value_error("set_mesh_poses_all: pos must be [num_envs, num_meshes, 3] and quat [num_envs, num_meshes, 4]");
+                     r.rows = N * M; r.pos = r.hp.data(); r.quat = r.hq.data();
+                     validate_rows(r.pos, r.quat, r.rows, "set_mesh_poses_all");
+                 }
+                 std::lock_guard<std::mutex> g(b.mutex());
+                 set_mesh_targets(b.sdf, -1, r, t, b.raw()->solverStream(), "set_mesh_poses_all");
+             }, py::arg("pos"), py::arg("quat"), py::arg("teleport") = false,
+             "Every mesh's pose at the END of the next step: pos [N,M,3], quat [N,M,4] (host or CUDA float32, M = mesh count), "
+             "teleport as in set_mesh_poses. One call per frame is what the Isaac bridge does.")
+        .def("clear_meshes",
+             [](RopeBatch& b) {
+                 std::lock_guard<std::mutex> g(b.mutex());
+                 b.sdf.clear();
+                 b.sdf.write_meta(b.raw()->meta, b.verts_per_rope());
+             }, "Remove every mesh (the material stays).")
+        // Contact-force readout (planes + meshes), averaged over the last step.
+        .def("enable_contact_forces",
+             [](RopeBatch& b, bool on) {
+                 std::lock_guard<std::mutex> g(b.mutex());
+                 b.sdf.enable_forces(on);
+                 b.sdf.write_meta(b.raw()->meta, b.verts_per_rope());
+             }, py::arg("on") = true,
+             "Accumulate contact forces during steps: contact_forces(_view) and mesh_wrenches(_view) become available (+2-5% cost).")
+        .def("contact_forces_view",   // device [N, V, 3] behind contact_forces() (valid until the next step)
+             [](RopeBatch& b) {
+                 std::lock_guard<std::mutex> g(b.mutex());
+                 if (!b.sdf.forces_enabled()) throw py::value_error("enable_contact_forces(True) first");
+                 return CudaView{b.sdf.contact_forces_ptr(), {b.num_envs(), b.verts_per_rope(), 3}};
+             }, py::keep_alive<0, 1>(), "Device view [N,V,3] of contact_forces() (valid until the next step; torch.as_tensor shares it).")
+        .def("mesh_wrenches_view",    // device [N, 32, 6] behind mesh_wrenches() (slots >= the mesh count are zero; valid until the next step)
+             [](RopeBatch& b) {
+                 std::lock_guard<std::mutex> g(b.mutex());
+                 if (!b.sdf.forces_enabled()) throw py::value_error("enable_contact_forces(True) first");
+                 return CudaView{b.sdf.wrenches_ptr(), {b.num_envs(), SdfStore::MAX, 6}};
+             }, py::keep_alive<0, 1>(), "Device view [N,32,6] of mesh_wrenches() (slots beyond the mesh count are zero; valid until the next step).")
+        .def("contact_forces",   // [N, V, 3]: force ON each vertex (world)
+             [](RopeBatch& b) {
+                 std::lock_guard<std::mutex> g(b.mutex());
+                 py::array_t<float> out({b.num_envs(), b.verts_per_rope(), 3});
+                 b.sdf.contact_forces(out.mutable_data());
+                 return out;
+             }, "[N,V,3] force ON each vertex from every surface, averaged over the last step (host copy).")
+        .def("mesh_wrenches",    // [N, M, 6]: (force, torque about the mesh origin) BY the rope ON each mesh (world)
+             [](RopeBatch& b) {
+                 std::lock_guard<std::mutex> g(b.mutex());
+                 py::array_t<float> out({b.num_envs(), b.sdf.count(), 6});
+                 b.sdf.wrenches(out.mutable_data());
+                 return out;
+             }, "[N,M,6] force and torque (about the mesh origin, world frame) BY the rope ON each mesh, averaged over the last step (host copy).")
         .def("set_gravity",
              [](RopeBatch& b, farray gv) {
                  glm::vec3 g3 = to_vec3(gv, "gravity");

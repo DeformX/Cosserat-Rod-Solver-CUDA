@@ -4,9 +4,9 @@
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
 #include "../YarnBall.h"
+#include "contact.cuh"
 
 namespace YarnBall {
-	using Kit::hess3;
 
 	// The main Cosserat iteration is split into sectors because we are compute bound when computing collisions
 	// The whole block is divided into THREADS_PER_VERTEX sectors. 
@@ -17,47 +17,8 @@ namespace YarnBall {
 #define THREADS_PER_VERTEX (2)
 #define VERTEX_PER_BLOCK (BLOCK_SIZE / THREADS_PER_VERTEX)
 
-	// Local patch (ropesim): rope vertex vs half-space contact.
-	// f/H follow cosseratItr's convention: f = -grad(incremental potential)
-	// at the current iterate, H its (approximate) Hessian; dx = displacement
-	// of this substep so far (velocity = dx/h).
-	// Normal: penalty E = 1/2 k pen^2 with k = m (kappa/h)^2, so the contact
-	// "frequency" is kappa/h for every vertex (end vertices included) and the
-	// numerical bounce is the same at any substep size. No contact damping: a
-	// dashpot that switches on at gap = 0 makes the local solve limit-cycle.
-	// Friction: regularized Coulomb (PyElastica's slip blend): stick stiffness
-	// muS*N/(eps*h) below the slip speed eps, muS -> muK between eps and 2 eps,
-	// muK*N above; lagged like YarnBall's friction (stiffness not differentiated).
-	__device__ inline void planeContact(const MetaData* data, const vec3 pos, const vec3 dx,
-		const float invMass, const float h, vec3& f, hess3& H) {
-		const float R = data->contactRadius;
-		const float kap = data->contactKappa / h;
-		const float k = kap * kap / invMass;
-		const float eps = data->contactVSlip;
-		for (int p = 0; p < data->numPlanes; p++) {
-			const vec4 pl = data->planes[p];
-			const vec3 n(pl.x, pl.y, pl.z);
-			const float dn = dot(n, dx);
-			const float gap = (dot(n, pos) - pl.w) + dn - R;	// rope surface to plane
-			if (gap >= 0) continue;
-			const float N = -k * gap;
-			f += N * n;
-			hess3 nn = hess3::outer(n);
-			H += nn * k;
-			const vec3 ut = dx - dn * n;
-			const float ul = length(ut);
-			const float vt = ul / h;
-			float kt;
-			if (vt <= eps) kt = data->contactMuS * N / (eps * h);
-			else {
-				const float s = 1.f - fminf(1.f, vt / eps - 1.f);
-				kt = (s * data->contactMuS + (1.f - s) * data->contactMuK) * N / ul;
-			}
-			f -= kt * ut;
-			nn.s.diag -= vec3(1);	// n n^T - I
-			H -= nn * kt;		// += kt (I - n n^T)
-		}
-	}
+	// Local patch (ropesim): surface contact (planes + posed SDF grids) lives in
+	// contact.cuh (surfacesAt), shared with the force readout in iteration.cu.
 
 	template<bool LIMIT>
 	__global__ void cosseratItr(MetaData* data) {
@@ -95,9 +56,11 @@ namespace YarnBall {
 				H.s.diag += stiffness * (1 + damping);
 			}
 
-			// Local patch (ropesim): rod-plane contact (vertex-local)
-			if (data->numPlanes > 0 && v0.invMass != 0)
-				planeContact(data, v0.pos, dx, v0.invMass, h, f, H);
+			// Local patch (ropesim): surface contact at this vertex (planes + meshes)
+			if ((data->numPlanes > 0 || data->numSdf > 0) && v0.invMass != 0) {
+				const float kap = data->contactKappa / h;
+				surfacesAt(data, tid / data->sdfEnvVerts, tid, v0.pos, dx, kap * kap / v0.invMass, h, f, H);
+			}
 		}
 
 		// We need to store absolute position and position updates seperatly for floating point precision

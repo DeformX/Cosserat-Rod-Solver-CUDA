@@ -69,7 +69,7 @@ target_compile_options(yarnball PRIVATE
 # Python module: bindings.cpp (pybind11 + CUDA-array-interface parsing) plus the
 # ropesim CUDA kernels. Nothing here includes torch.
 # ---------------------------------------------------------------------------
-pybind11_add_module(_ropesim csrc/bindings.cpp csrc/batch.cu)
+pybind11_add_module(_ropesim csrc/bindings.cpp csrc/batch.cu csrc/sdf.cu)
 target_link_libraries(_ropesim PRIVATE yarnball)
 
 install(TARGETS _ropesim DESTINATION ropesim)

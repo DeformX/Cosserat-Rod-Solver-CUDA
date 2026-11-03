@@ -45,7 +45,7 @@ namespace YarnBall {
 		uploadMeta();
 
 		for (int s = 0; s < steps; s++, stepCounter++) {
-			startIterate();
+			startIterate(s, steps);	// Local patch (ropesim): substep index for kinematic meshes
 			if (meta.detectionPeriod > 0 && stepCounter % meta.detectionPeriod == 0)
 				detectCollisions();
 			cudaGraphLaunch(stepGraph, stream);
