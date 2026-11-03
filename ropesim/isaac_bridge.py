@@ -1,4 +1,4 @@
-"""Isaac Lab bridge for rod-mesh contact (AGENTS 5c): PhysX owns every rigid body, ropesim owns the rope.
+"""Isaac Lab bridge for rod-mesh contact (docs/SOLVER.md section 6): PhysX owns every rigid body, ropesim owns the rope.
 
 Once per scene, each collider body is baked into a signed-distance grid in its own link frame (from the
 USD collision prims under the body, or its visual meshes). Every control frame, after PhysX stepped:
@@ -35,7 +35,7 @@ class ColliderSpec:
     spacing: float = 0.005              # grid cell [m]
     margin: float = 0.03                # lattice padding beyond the surface [m] (>= rope radius + a few cells)
     round: float = 0.0                  # fillet radius: rounds convex edges (no snag when a rope is dragged over
-                                        # them, AGENTS 5c) but makes the body FATTER by `round` on every face, so
+                                        # them, docs/SOLVER.md section 5) but makes the body FATTER by `round` on every face, so
                                         # the rope then rests `round` above the PhysX surface; 0 = exact shape
     thickness: float = 0.0              # shell thickness for a collider that is open even after welding (0 = auto)
 

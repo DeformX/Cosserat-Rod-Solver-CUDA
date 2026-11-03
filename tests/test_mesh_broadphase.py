@@ -1,4 +1,4 @@
-"""Many meshes per sim (AGENTS 5c): the per-vertex broad phase (world AABB candidates rebuilt every
+"""Many meshes per sim (docs/SOLVER.md section 5): the per-vertex broad phase (world AABB candidates rebuilt every
 substep), the cap of 32, per-mesh friction, poses given as CUDA tensors, and the device views of the
 force readout. Same rope as test_mesh_contact (rope_A, 21 x 5 cm, h = 1/6000)."""
 import numpy as np

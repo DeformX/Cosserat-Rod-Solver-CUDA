@@ -3,7 +3,7 @@ the plane contact law evaluated on an SDF. Closed-form shapes give analytic
 checks (box floor = plane, posed incline Coulomb, capstan hold/slip, thin
 wall); a baked triangle mesh is checked against its closed form.
 
-Rope: 21 vertices x 5 cm, rho 0.117 kg/m, EA 11.5 kN, EI 4.5e-3 (DeformY's
+Rope: 21 vertices x 5 cm, rho 0.117 kg/m, EA 11.5 kN, EI 4.5e-3 (DeformX's
 rope_A fit), radius 6.35 mm, h = 1/6000 s, 16 iterations, kappa = 2.
 """
 import numpy as np

@@ -1,4 +1,4 @@
-"""Signed-distance grids for rod-mesh contact (AGENTS §5c).
+"""Signed-distance grids for rod-mesh contact (docs/SOLVER.md section 5).
 
 A grid is phi sampled on a node lattice in the object's own frame: node
 (i, j, k) sits at origin + (i, j, k) * spacing, values[i, j, k] = signed
@@ -109,7 +109,7 @@ def bake_mesh(vertices, triangles, spacing, margin, thickness=0.0, round=0.0, de
     every convex edge with that radius but also makes the object fatter by `round`
     on every face (a mesh cannot be shrunk first; sdf_box can): round convex edges
     to about half the rope's segment length, or a rope dragged over a sharp edge
-    snags (see AGENTS 5c).
+    snags (see docs/SOLVER.md section 5).
     margin [m] pads the box on every side beyond the shell and rounding (use >=
     rope radius + a few cells).
     """
@@ -178,7 +178,7 @@ def sdf_box(half, centre=(0, 0, 0), round=0.0):
     Put the object origin on the face the rope will rest on: the contact gap is resolved
     at float32 steps of the vertex's object-frame coordinate (7 nm at 0.13 m, 60 nm at
     0.8 m) against a rest sink of only g h^2 / kappa^2 (68 nm at h = 1/6000, kappa = 2).
-    Round convex edges to about half the rope's segment length (AGENTS 5c)."""
+    Round convex edges to about half the rope's segment length (docs/SOLVER.md section 5)."""
     half = np.asarray(half, np.float64) - round
     if (half < 0).any():
         raise ValueError("round must not exceed the smallest half extent")

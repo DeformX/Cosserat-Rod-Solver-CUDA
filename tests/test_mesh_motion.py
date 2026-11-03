@@ -1,4 +1,4 @@
-"""Kinematic (moving) meshes and the contact-force readout (AGENTS 5c).
+"""Kinematic (moving) meshes and the contact-force readout (docs/SOLVER.md section 5).
 
 A pose given to set_mesh_pose(s) is the pose at the END of the next step: the
 mesh moves there over the substeps at constant linear/angular velocity, and

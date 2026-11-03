@@ -1,19 +1,20 @@
 # ropesim validation suite
 
-Physics-grounded validation of the wrapped, de-collisioned YarnBall Cosserat
-solver — run **before** building batching / Isaac Lab layers on top.
+Physics-grounded validation of the wrapped, de-collisioned YarnBall Cosserat solver:
+124 tests, one of them a strict expected failure that guards the measured stiffness limit.
 
 ```bash
-pip install -e .                      # rebuild after any csrc/ change
-bash scripts/run_tests.sh             # full suite
-bash scripts/run_tests.sh -m 'not slow'
+pip install -e .                      # rebuild after any csrc/ or third_party/ change
+pytest                                # full suite (a few minutes on one GPU)
+pytest -m 'not slow'                  # without the 30 s long-run test
+pytest tests/test_statics.py -k elongation
 ```
 
 ## Contact tests (2026-10)
 
 | file | what | needs |
 |---|---|---|
-| `test_contact.py` | rod–plane and rope–rope contact (AGENTS §5b) | torch |
+| `test_contact.py` | rod–plane and rope–rope contact (docs/SOLVER.md section 5) | torch |
 | `test_mesh_contact.py` | rod–mesh contact on signed-distance grids: box ≡ plane, posed incline, capstan, drape, thin wall, baked vs closed form, per-env poses, API | torch; one test skips without `warp` + `trimesh` |
 | `test_mesh_motion.py` | kinematic (moving) meshes: interpolation, moving-surface friction, teleport, force readout | torch |
 | `test_mesh_broadphase.py` | 32 meshes, candidate lists, per-mesh friction, CUDA-tensor targets, device views, review-3 regressions | torch |

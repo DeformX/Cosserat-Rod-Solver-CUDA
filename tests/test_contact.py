@@ -2,7 +2,7 @@
 stick/slip, static vs kinetic friction, no pass-through) plus the
 contact-off / batch bitwise guarantees.
 
-Rope: 21 vertices x 5 cm, rho 0.117 kg/m, EA 11.5 kN, EI 4.5e-3 (DeformY's
+Rope: 21 vertices x 5 cm, rho 0.117 kg/m, EA 11.5 kN, EI 4.5e-3 (DeformX's
 rope_A fit), radius 6.35 mm, h = 1/6000 s, 16 iterations, contact kappa = 2
 (the default).
 """
@@ -135,7 +135,7 @@ def test_batch_plane_contact_matches_single_env():
     """Plane contact is vertex-local: env 0 is bitwise identical alone or in a batch."""
     def run(n):
         roots = [[3.0 * e, 0.0, 1.1] for e in range(n)]   # 1 m rope: tip starts 10 cm above the floor
-        tilt = np.radians(2.0)                         # perfectly vertical = the end-on column case (AGENTS §5b)
+        tilt = np.radians(2.0)                         # perfectly vertical = the end-on column case (docs/SOLVER.md section 5)
         b = batch(roots, dir3=(np.sin(tilt), 0.0, -np.cos(tilt)))
         b.set_planes(np.array([[0.0, 0.0, 1.0, 0.0]], np.float32), radius=R, mu_s=0.5, mu_k=0.4)
         root = torch.tensor(roots, device="cuda", dtype=torch.float32)
