@@ -1,0 +1,38 @@
+[build-system]
+requires = ["scikit-build-core>=0.10", "pybind11>=2.12"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "ropesim"
+version = "0.1.0"
+description = "GPU Cosserat rod solver (Stable Cosserat Rods / YarnBall) with batched ropes, contact and an Isaac Lab bridge"
+readme = "README.md"
+license = { text = "GPL-3.0-or-later" }
+requires-python = ">=3.10"
+authors = [
+    { name = "Yi Yang" },
+    { name = "Lehong Wang" },
+]
+# numpy/torch are expected from the runtime environment (torch's CUDA build must
+# match the toolkit this package is compiled with).
+dependencies = ["numpy"]
+
+[project.urls]
+Homepage = "https://github.com/DeformX/Cosserat-Rod-Solver-CUDA"
+"DeformX" = "https://deformx.github.io/"
+
+[project.optional-dependencies]
+bake = ["warp-lang"]          # ropesim.sdf.bake_mesh (GPU closest-point bake of triangle meshes)
+dev = ["pytest>=8.0"]
+
+[tool.scikit-build]
+cmake.version = ">=3.24"
+build-dir = "build/{wheel_tag}"
+wheel.packages = ["ropesim"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+    "slow: long-running stability tests (deselect with -m 'not slow')",
+]
