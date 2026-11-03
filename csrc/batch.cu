@@ -92,10 +92,15 @@ __global__ void applyRootProgramK(Vertex* verts, glm::vec3* vels,
     vels[root] = V0 + (tau + 0.5f * h) * A;
 
     if (q0) {
-        const glm::vec4 qa(q0[4 * e], q0[4 * e + 1], q0[4 * e + 2], q0[4 * e + 3]);
+        // normalize INPUTS: slerp's dot/angle math assumes unit quaternions
+        glm::vec4 qa(q0[4 * e], q0[4 * e + 1], q0[4 * e + 2], q0[4 * e + 3]);
+        float la = glm::dot(qa, qa);
+        qa = (la > 0.f) ? qa * rsqrtf(la) : glm::vec4(0, 0, 0, 1);
         glm::vec4 q;
         if (q1) {
-            const glm::vec4 qb(q1[4 * e], q1[4 * e + 1], q1[4 * e + 2], q1[4 * e + 3]);
+            glm::vec4 qb(q1[4 * e], q1[4 * e + 1], q1[4 * e + 2], q1[4 * e + 3]);
+            float lb = glm::dot(qb, qb);
+            qb = (lb > 0.f) ? qb * rsqrtf(lb) : glm::vec4(0, 0, 0, 1);
             q = slerp4(qa, qb, float(sIdx + 1) / float(nSub));
         } else {
             q = qa;
@@ -106,15 +111,20 @@ __global__ void applyRootProgramK(Vertex* verts, glm::vec3* vels,
     }
 }
 
-// One thread per vertex: AoS verts / vels -> contiguous [N*V,3] float arrays.
+// One thread per vertex: AoS solver state -> contiguous float arrays
+// (copies, so consumers can never mutate live solver state).
 __global__ void gatherK(const Vertex* verts, const glm::vec3* vels,
-                        float* outPos, float* outVel, int total) {
+                        const Kit::Rotor* qs, float* outPos, float* outVel,
+                        float* outQuat, int total) {
     const int i = threadIdx.x + blockIdx.x * blockDim.x;
     if (i >= total) return;
     const glm::vec3 p = verts[i].pos;
     outPos[3 * i] = p.x; outPos[3 * i + 1] = p.y; outPos[3 * i + 2] = p.z;
     const glm::vec3 v = vels[i];
     outVel[3 * i] = v.x; outVel[3 * i + 1] = v.y; outVel[3 * i + 2] = v.z;
+    const glm::vec4 q = qs[i].v;
+    outQuat[4 * i] = q.x; outQuat[4 * i + 1] = q.y;
+    outQuat[4 * i + 2] = q.z; outQuat[4 * i + 3] = q.w;
 }
 
 // One thread per (selected env, vertex): restore construction-time state.
@@ -183,6 +193,7 @@ RopeBatch::RopeBatch(int num_envs, int verts_per_rope, float seg_len,
     checkCudaErrors(cudaMalloc(&d_initQ, sizeof(glm::vec4) * total));
     checkCudaErrors(cudaMalloc(&d_outPos, sizeof(float) * 3 * total));
     checkCudaErrors(cudaMalloc(&d_outVel, sizeof(float) * 3 * total));
+    checkCudaErrors(cudaMalloc(&d_outQuat, sizeof(float) * 4 * total));
     checkCudaErrors(cudaMalloc(&d_ids, sizeof(int) * N));
     checkCudaErrors(cudaMalloc(&d_prog, sizeof(float) * 17 * N));
     checkCudaErrors(cudaMemcpy(d_initPos, ip.data(), sizeof(glm::vec3) * total,
@@ -199,6 +210,7 @@ RopeBatch::~RopeBatch() {
     cudaFree(d_initQ);
     cudaFree(d_outPos);
     cudaFree(d_outVel);
+    cudaFree(d_outQuat);
     cudaFree(d_ids);
     cudaFree(d_prog);
 }
@@ -290,7 +302,8 @@ void RopeBatch::gather() {
 void RopeBatch::gather_nolock() {
     const int total = N * V;
     gatherK<<<(total + 255) / 256, 256, 0, sim->solverStream()>>>(
-        sim->meta.d_verts, sim->meta.d_vels, d_outPos, d_outVel, total);
+        sim->meta.d_verts, sim->meta.d_vels, sim->meta.d_qs,
+        d_outPos, d_outVel, d_outQuat, total);
 }
 
 }  // namespace ropesim

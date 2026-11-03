@@ -58,8 +58,33 @@ namespace YarnBall {
 
 		// Linear velocity
 		vec3 dx = data->d_dx[tid];
-		if (verts[tid].invMass != 0)
-			data->d_vels[tid] = dx * invH * (1 - data->drag * h);
+		if (verts[tid].invMass != 0) {
+			vec3 v = dx * invH;
+			const float kn = data->dragQuad;
+			if (kn > 0) {
+				// Local patch (ropesim): quadratic cross-flow air drag
+				// (Morison / fly-line form). Split v by the local segment
+				// tangent; per component apply the exact frozen-direction
+				// substep solution of dv/dt = -k|v|v, i.e. v /= (1 + k|v|h):
+				// unconditionally stable, substep-invariant.
+				// kn = .5*rho_air*Cd_n*d/lambda [1/m]. Vertex mass and
+				// half-segment drag length lump with identical weights
+				// (mass = .5*lambda*(l_prev+l_next) in configure()), so a
+				// uniform kn is exact at interior, root, and tip vertices.
+				// Tip vertex (hasPrev only) uses its one real segment's
+				// rotor; pinned verts (invMass==0) never reach here, so the
+				// commanded root velocity is never drag-filtered.
+				const vec3 t = (verts[tid].flags & (uint32_t)VertexFlags::hasNext) ?
+					data->d_qs[tid] * vec3(1, 0, 0) :
+					data->d_qs[tid - 1] * vec3(1, 0, 0);
+				vec3 vt = t * dot(t, v);
+				vec3 vn = v - vt;
+				vn /= 1 + kn * length(vn) * h;
+				vt /= 1 + data->dragQuadT * length(vt) * h;
+				v = vn + vt;
+			}
+			data->d_vels[tid] = v * (1 - data->drag * h);
+		}
 		verts[tid].pos += dx;
 	}
 

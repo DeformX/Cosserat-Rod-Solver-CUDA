@@ -6,7 +6,11 @@ from conftest import H, drive, make_rope, rope_length, segment_strains
 
 
 @pytest.mark.slow
-def test_long_random_driving_stable():
+@pytest.mark.parametrize("num_itr,drag_quad", [
+    (8, 0.0),      # legacy operating point
+    (16, 0.094),   # 2026-08-11 env default + quadratic cross-flow drag
+])
+def test_long_random_driving_stable(num_itr, drag_quad):
     rng = np.random.default_rng(0)
     amps = rng.uniform(0.03, 0.08, size=(3, 3))
     freqs = rng.uniform(0.3, 1.5, size=(3, 3))
@@ -17,6 +21,8 @@ def test_long_random_driving_stable():
             * np.array([1.0, 0.3, 1.0])
 
     r = make_rope(n=33, direction=(0, -1, 0), drag=0.05)
+    r.num_itr = num_itr
+    r.drag_quad = drag_quad
     L = rope_length(r)
     t_end = 30.0
     _, tips, roots = drive(r, traj, t_end)

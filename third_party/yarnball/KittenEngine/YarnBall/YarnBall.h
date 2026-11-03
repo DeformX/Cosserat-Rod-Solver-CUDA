@@ -108,6 +108,16 @@ namespace YarnBall {
 
 		float damping;			// Damping forces
 		float drag;				// Velocity decay
+		// Local patch (ropesim): quadratic cross-flow air drag (Morison form).
+		// dragQuad = .5*rho_air*Cd_n*d/lambda [1/m] acts on the segment-normal
+		// velocity component; dragQuadT is the tangential (skin) coefficient
+		// on the segment-tangential component (0 = off; = dragQuad gives a
+		// component-isotropic quadratic model; inert while dragQuad == 0).
+		// dragQuad == 0 (default) takes the legacy path with an unchanged
+		// arithmetic DAG (bitwise-identical output expected).
+		// See sim/iteration.cu endItr.
+		float dragQuad;			// Quadratic normal drag coefficient [1/m]
+		float dragQuadT;		// Quadratic tangential drag coefficient [1/m]
 		float frictionCoeff;	// Friction coefficient for contacts
 		float kCollision;		// Stiffness of the collision
 		float kFriction;		// Stiffness of the collision

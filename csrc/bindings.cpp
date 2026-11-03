@@ -293,9 +293,45 @@ public:
         sim->upload();
     }
 
+    // Overwrite all vertex velocities [n,3] (diagnostic/test API). NOTE: a
+    // pinned vertex's row sets its KINEMATIC velocity — the root advects at
+    // pos += h*v per substep exactly like set_root() driving (only the
+    // drag/velocity WRITE-BACK is invMass-guarded, not advection). Pass
+    // zeros for pinned rows to keep them stationary.
+    void set_velocities(const farray& vel) {
+        if (vel.ndim() != 2 || vel.shape(0) != n || vel.shape(1) != 3)
+            throw py::value_error("expected [n,3] array of velocities");
+        auto b = vel.unchecked<2>();
+        for (int i = 0; i < n; i++)
+            for (int j = 0; j < 3; j++)
+                if (!std::isfinite(b(i, j)))
+                    throw py::value_error("velocities must be finite");
+        std::lock_guard<std::mutex> g(mtx_);
+        sim->download();
+        for (int i = 0; i < n; i++)
+            sim->vels[i] = glm::vec3(b(i, 0), b(i, 1), b(i, 2));
+        sim->upload();
+    }
+
     // --- meta knobs (plain field writes; re-uploaded by the next advance) ---
     float get_drag() const { std::lock_guard<std::mutex> g(mtx_); return sim->meta.drag; }
     void set_drag(float v) { std::lock_guard<std::mutex> g(mtx_); sim->meta.drag = v; }
+    // Quadratic cross-flow air drag (see YarnBall.h MetaData): drag_quad is
+    // the normal coefficient .5*rho_air*Cd_n*d/lambda [1/m] (0 = legacy
+    // bit-exact path), drag_quad_t the tangential one (active only while
+    // drag_quad > 0).
+    float get_drag_quad() const { std::lock_guard<std::mutex> g(mtx_); return sim->meta.dragQuad; }
+    void set_drag_quad(float v) {
+        if (!std::isfinite(v) || v < 0) throw py::value_error("drag_quad must be finite and >= 0");
+        std::lock_guard<std::mutex> g(mtx_);
+        sim->meta.dragQuad = v;
+    }
+    float get_drag_quad_t() const { std::lock_guard<std::mutex> g(mtx_); return sim->meta.dragQuadT; }
+    void set_drag_quad_t(float v) {
+        if (!std::isfinite(v) || v < 0) throw py::value_error("drag_quad_t must be finite and >= 0");
+        std::lock_guard<std::mutex> g(mtx_);
+        sim->meta.dragQuadT = v;
+    }
     float get_damping() const { std::lock_guard<std::mutex> g(mtx_); return sim->meta.damping; }
     void set_damping(float v) { std::lock_guard<std::mutex> g(mtx_); sim->meta.damping = v; }
     int get_num_itr() const { std::lock_guard<std::mutex> g(mtx_); return sim->meta.numItr; }
@@ -357,7 +393,8 @@ CaiArray parse_cai(const py::object& obj, std::vector<py::ssize_t> want,
         auto strides = strides_obj.cast<std::vector<py::ssize_t>>();
         py::ssize_t expect = 4;  // float32, C order
         for (size_t i = shape.size(); i-- > 0;) {
-            if (strides[i] != expect)
+            // stride of a size-1 dim is irrelevant (e.g. expand() gives 0)
+            if (shape[i] != 1 && strides[i] != expect)
                 throw py::value_error(std::string(name) + " must be C-contiguous");
             expect *= shape[i];
         }
@@ -416,6 +453,9 @@ PYBIND11_MODULE(_ropesim, m) {
              [](RopeSim& s, farray g) { s.set_gravity(to_vec3(g, "gravity")); },
              py::arg("gravity"))
         .def_property("drag", &RopeSim::get_drag, &RopeSim::set_drag)
+        .def_property("drag_quad", &RopeSim::get_drag_quad, &RopeSim::set_drag_quad)
+        .def_property("drag_quad_t", &RopeSim::get_drag_quad_t, &RopeSim::set_drag_quad_t)
+        .def("set_velocities", &RopeSim::set_velocities, py::arg("velocities"))
         .def_property("damping", &RopeSim::get_damping, &RopeSim::set_damping)
         .def_property("num_itr", &RopeSim::get_num_itr, &RopeSim::set_num_itr)
         .def_property("accel_ratio", &RopeSim::get_accel_ratio, &RopeSim::set_accel_ratio)
@@ -502,6 +542,7 @@ PYBIND11_MODULE(_ropesim, m) {
                          throw py::value_error(
                              "root_q_end requires root_pos_end (the motion-"
                              "program path)");
+                     b.stepped = true;  // per-vertex setters now illegal
                      py::gil_scoped_release rel;
                      b.step(reinterpret_cast<const float*>(p.ptr),
                             reinterpret_cast<const float*>(v.ptr), qp, dt,
@@ -521,6 +562,7 @@ PYBIND11_MODULE(_ropesim, m) {
                      q1 = parse_cai(root_q_end, {b.num_envs(), 4}, "root_q_end");
                      q1p = reinterpret_cast<const float*>(q1.ptr);
                  }
+                 b.stepped = true;  // per-vertex setters now illegal
                  py::gil_scoped_release rel;
                  b.step_program(reinterpret_cast<const float*>(p.ptr),
                                 reinterpret_cast<const float*>(v.ptr),
@@ -534,6 +576,10 @@ PYBIND11_MODULE(_ropesim, m) {
         .def("reset_envs",
              [](RopeBatch& b, py::array_t<int, py::array::c_style | py::array::forcecast> ids) {
                  if (ids.ndim() != 1) throw py::value_error("ids must be 1-D");
+                 // d_ids is sized for num_envs ints; more (only possible via
+                 // duplicates) would overflow the device buffer
+                 if (ids.shape(0) > b.num_envs())
+                     throw py::value_error("ids longer than num_envs");
                  auto r = ids.unchecked<1>();
                  std::vector<int> v((size_t)r.shape(0));
                  for (py::ssize_t i = 0; i < r.shape(0); i++) {
@@ -565,6 +611,20 @@ PYBIND11_MODULE(_ropesim, m) {
         .def_property("drag",
              [](RopeBatch& b) { std::lock_guard<std::mutex> g(b.mutex()); return b.raw()->meta.drag; },
              [](RopeBatch& b, float v) { std::lock_guard<std::mutex> g(b.mutex()); b.raw()->meta.drag = v; })
+        .def_property("drag_quad",
+             [](RopeBatch& b) { std::lock_guard<std::mutex> g(b.mutex()); return b.raw()->meta.dragQuad; },
+             [](RopeBatch& b, float v) {
+                 if (!std::isfinite(v) || v < 0) throw py::value_error("drag_quad must be finite and >= 0");
+                 std::lock_guard<std::mutex> g(b.mutex());
+                 b.raw()->meta.dragQuad = v;
+             })
+        .def_property("drag_quad_t",
+             [](RopeBatch& b) { std::lock_guard<std::mutex> g(b.mutex()); return b.raw()->meta.dragQuadT; },
+             [](RopeBatch& b, float v) {
+                 if (!std::isfinite(v) || v < 0) throw py::value_error("drag_quad_t must be finite and >= 0");
+                 std::lock_guard<std::mutex> g(b.mutex());
+                 b.raw()->meta.dragQuadT = v;
+             })
         .def_property("damping",
              [](RopeBatch& b) { std::lock_guard<std::mutex> g(b.mutex()); return b.raw()->meta.damping; },
              [](RopeBatch& b, float v) { std::lock_guard<std::mutex> g(b.mutex()); b.raw()->meta.damping = v; })
@@ -581,6 +641,101 @@ PYBIND11_MODULE(_ropesim, m) {
                  std::lock_guard<std::mutex> g(b.mutex());
                  b.raw()->meta.gravity = g3;
              }, py::arg("gravity"))
+        // ------- per-vertex property API (2026-08-24, e6 non-uniform ropes) -------
+        // Legal ONLY between construction and the first step (batch.h `stepped`):
+        // in that window the host mirror is authoritative, so the RopeSim
+        // download-mutate-upload pattern is safe. Arrays broadcast: 1-D applies
+        // the same profile to every env; 2-D is per-env. Mirrors the RopeSim
+        // setters (kStretch = EA*lRest; qRest = (4*EI/lRest)*normalize(qRest)).
+        .def("inv_masses",
+             [](RopeBatch& b) {
+                 std::lock_guard<std::mutex> g(b.mutex());
+                 b.raw()->download();
+                 const int N = b.num_envs(), V = b.verts_per_rope();
+                 py::array_t<float> arr({N, V});
+                 auto o = arr.mutable_unchecked<2>();
+                 for (int e = 0; e < N; e++)
+                     for (int v = 0; v < V; v++)
+                         o(e, v) = b.raw()->verts[(size_t)e * V + v].invMass;
+                 return arr;
+             })
+        .def("set_masses",
+             [](RopeBatch& b, farray m) {
+                 if (b.stepped)
+                     throw py::value_error(
+                         "set_masses is only legal before the first step");
+                 const int N = b.num_envs(), V = b.verts_per_rope();
+                 const bool per_env = m.ndim() == 2;
+                 if (!((m.ndim() == 1 && m.shape(0) == V) ||
+                       (per_env && m.shape(0) == N && m.shape(1) == V)))
+                     throw py::value_error("expected [V] or [num_envs, V] node masses (kg)");
+                 auto get = [&](int e, int v) {
+                     return per_env ? m.unchecked<2>()(e, v) : m.unchecked<1>()(v);
+                 };
+                 for (int e = 0; e < (per_env ? N : 1); e++)
+                     for (int v = 1; v < V; v++)
+                         if (!std::isfinite(get(e, v)) || !(get(e, v) > 0))
+                             throw py::value_error("node masses must be finite and > 0 (root column ignored)");
+                 std::lock_guard<std::mutex> g(b.mutex());
+                 b.raw()->download();
+                 for (int e = 0; e < N; e++)
+                     for (int v = 1; v < V; v++)   // v=0 is the pinned root: invMass stays 0
+                         b.raw()->verts[(size_t)e * V + v].invMass = 1.f / get(e, v);
+                 b.raw()->upload();
+             }, py::arg("masses"))
+        .def("set_stretch_stiffnesses",
+             [](RopeBatch& b, farray ea) {
+                 if (b.stepped)
+                     throw py::value_error(
+                         "set_stretch_stiffnesses is only legal before the first step");
+                 const int N = b.num_envs(), V = b.verts_per_rope();
+                 const bool per_env = ea.ndim() == 2;
+                 if (!((ea.ndim() == 1 && ea.shape(0) == V - 1) ||
+                       (per_env && ea.shape(0) == N && ea.shape(1) == V - 1)))
+                     throw py::value_error("expected [V-1] or [num_envs, V-1] EA values");
+                 auto get = [&](int e, int v) {
+                     return per_env ? ea.unchecked<2>()(e, v) : ea.unchecked<1>()(v);
+                 };
+                 for (int e = 0; e < (per_env ? N : 1); e++)
+                     for (int v = 0; v < V - 1; v++)
+                         if (!std::isfinite(get(e, v)) || !(get(e, v) > 0))
+                             throw py::value_error("EA values must be finite and > 0");
+                 std::lock_guard<std::mutex> g(b.mutex());
+                 b.raw()->download();
+                 for (int e = 0; e < N; e++)
+                     for (int v = 0; v < V - 1; v++) {
+                         const size_t i = (size_t)e * V + v;
+                         b.raw()->verts[i].kStretch = get(e, v) * b.raw()->verts[i].lRest;
+                     }
+                 b.raw()->upload();
+             }, py::arg("ea"))
+        .def("set_bend_stiffnesses",
+             [](RopeBatch& b, farray ei) {
+                 if (b.stepped)
+                     throw py::value_error(
+                         "set_bend_stiffnesses is only legal before the first step");
+                 const int N = b.num_envs(), V = b.verts_per_rope();
+                 const bool per_env = ei.ndim() == 2;
+                 if (!((ei.ndim() == 1 && ei.shape(0) == V - 1) ||
+                       (per_env && ei.shape(0) == N && ei.shape(1) == V - 1)))
+                     throw py::value_error("expected [V-1] or [num_envs, V-1] EI values");
+                 auto get = [&](int e, int v) {
+                     return per_env ? ei.unchecked<2>()(e, v) : ei.unchecked<1>()(v);
+                 };
+                 for (int e = 0; e < (per_env ? N : 1); e++)
+                     for (int v = 0; v < V - 1; v++)
+                         if (!std::isfinite(get(e, v)) || !(get(e, v) > 0))
+                             throw py::value_error("EI values must be finite and > 0 (0 -> NaN, see RopeSim)");
+                 std::lock_guard<std::mutex> g(b.mutex());
+                 b.raw()->download();
+                 for (int e = 0; e < N; e++)
+                     for (int v = 0; v < V - 1; v++) {
+                         const size_t i = (size_t)e * V + v;
+                         const float k = 4.f * get(e, v) / b.raw()->verts[i].lRest;
+                         b.raw()->qRests[i] = k * glm::normalize((glm::vec4)b.raw()->qRests[i]);
+                     }
+                 b.raw()->upload();
+             }, py::arg("ei"))
         .def_property_readonly("time",
              [](RopeBatch& b) { std::lock_guard<std::mutex> g(b.mutex()); return b.raw()->meta.time; })
         .def_property_readonly("last_error",

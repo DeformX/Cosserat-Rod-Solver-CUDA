@@ -15,6 +15,8 @@ namespace YarnBall {
 		meta.gravity = vec3(0, -9.8, 0);
 		meta.h = maxH;
 		meta.drag = 0.2;
+		meta.dragQuad = 0.f;	// Local patch (ropesim): quadratic drag off by default
+		meta.dragQuadT = 0.f;
 		meta.damping = 1e-6;
 		meta.time = 0.f;
 

@@ -46,11 +46,21 @@ Added at vendoring time (this repo only):
    by `if (glGetString)`, NULL without a GL context); the guards make them
    dead at compile/link time too. Builds with `-DYARNBALL_HEADLESS` only;
    without the define the sources are upstream-identical.
+6. Quadratic cross-flow air drag (`meta.dragQuad`/`meta.dragQuadT`, added
+   2026-08-11): `YarnBall/YarnBall.h` (two MetaData fields),
+   `YarnBall/YarnBall.cu` (zero defaults in `Sim()`),
+   `YarnBall/sim/iteration.cu` (`endItr`: split v by the segment tangent
+   from `d_qs`, apply v /= (1 + k|v|h) per component). All hunks marked
+   "Local patch (ropesim)". `dragQuad == 0` (the default) leaves the legacy
+   arithmetic DAG unchanged (bitwise-identical output expected), so upstream
+   behavior is unchanged unless enabled.
 
 ## Updating
 
 Diff against the upstream paths under `KittenEngine/` in YarnBall-Linux,
-re-copy changed files, and re-apply patch 5: ONE hunk in `YarnBall.h` and
-FOUR hunks in `YarnBall.cu`, every one marked "Local patch (ropesim
-vendoring)". Missing any of the `YarnBall.cu` hunks breaks the headless
-compile (`Kitten::Mesh`/`ComputeBuffer` are forward-declared only).
+re-copy changed files, and re-apply patches 5-6: patch 5 = ONE hunk in
+`YarnBall.h` and FOUR hunks in `YarnBall.cu`, every one marked "Local patch
+(ropesim vendoring)" — missing any of the `YarnBall.cu` hunks breaks the
+headless compile (`Kitten::Mesh`/`ComputeBuffer` are forward-declared only);
+patch 6 = ONE hunk each in `YarnBall.h`, `YarnBall.cu`, and
+`sim/iteration.cu`, marked "Local patch (ropesim)".

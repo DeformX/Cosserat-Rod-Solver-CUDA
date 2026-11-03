@@ -64,14 +64,17 @@ public:
 
     void gather();  // refresh observation buffers outside step (rarely needed)
 
-    // Contiguous float32 device buffers, refreshed by step()/reset_envs():
-    //   positions  [N, V, 3]
-    //   velocities [N, V, 3]  (valid between steps; roots show commanded vel)
+    // Contiguous float32 device SCRATCH buffers, refreshed by
+    // step()/reset_envs() — copies, so Python-side writes cannot corrupt
+    // solver state:
+    //   positions   [N, V, 3]
+    //   velocities  [N, V, 3]  (valid between steps; roots show the commanded
+    //                           velocity — in program mode the last substep's
+    //                           midpoint sample, i.e. v(dt - h/2))
+    //   quaternions [N, V, 4]  (x,y,z,w; entry (e, V-1) is padding)
     uintptr_t positions_ptr() const { return (uintptr_t)d_outPos; }
     uintptr_t velocities_ptr() const { return (uintptr_t)d_outVel; }
-    // Raw solver quaternion array [N, V, 4] (x,y,z,w); entry (e, V-1) is
-    // padding. Zero-copy view straight into the solver state.
-    uintptr_t quaternions_ptr() const { return (uintptr_t)sim->meta.d_qs; }
+    uintptr_t quaternions_ptr() const { return (uintptr_t)d_outQuat; }
 
     int num_envs() const { return N; }
     int verts_per_rope() const { return V; }
@@ -79,6 +82,13 @@ public:
 
     YarnBall::Sim* raw() { return sim.get(); }
     std::mutex& mutex() { return mtx_; }
+
+    // Set by the bindings on the first step()/step_program(). Per the review
+    // finding above there is no host upload path AFTER the GPU owns root
+    // state; the per-vertex property setters (bindings.cpp) therefore refuse
+    // to run once this is true. Between construction and the first step the
+    // host mirror is authoritative, so download-mutate-upload is safe there.
+    bool stepped = false;
 
 private:
     void gather_nolock();
@@ -91,6 +101,7 @@ private:
     glm::vec4* d_initQ = nullptr;    // [N*V] construction-time frames
     float* d_outPos = nullptr;       // [N*V*3] gathered positions
     float* d_outVel = nullptr;       // [N*V*3] gathered velocities
+    float* d_outQuat = nullptr;      // [N*V*4] gathered segment frames
     int* d_ids = nullptr;            // [N] scratch for reset indices
     float* d_prog = nullptr;         // [17*N] staged motion program
                                      // (p0,v0,p1:3N each; q0,q1:4N each) —
