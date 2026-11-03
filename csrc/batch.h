@@ -96,8 +96,15 @@ public:
     // each root every substep, so the bindings then allow step_free() only.
     bool rootsPinned = true;
 
+    // Rope-rope contact (per-group brute-force detection + YarnBall's contact
+    // model). groupRopes consecutive ropes form one contact group (an env);
+    // ropes in different groups never interact.
+    void set_rope_contact(bool enabled, float radius, float barrier, float kCollision,
+                          float mu, float kFriction, float detectionScaler, int groupRopes);
     // Substeps without a root program (free ropes / roots held in place).
     void step_free(float dt, int substeps);
+    bool ropeContact = false;
+    int groupVerts = 0;
 
 private:
     void gather_nolock();

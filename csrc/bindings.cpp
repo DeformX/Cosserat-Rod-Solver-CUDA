@@ -729,6 +729,22 @@ PYBIND11_MODULE(_ropesim, m) {
              }, py::arg("positions"), py::arg("density"), py::arg("k_stretch"), py::arg("k_bend"),
              py::arg("max_h"), py::arg("num_itr"), py::arg("fix_root_orientation") = false,
              py::arg("pinned") = py::none())
+        // Rope-rope contact: YarnBall's barrier/friction/step-limit model, fed by a
+        // per-group brute-force detector. Contact starts at centreline distance
+        // 2*radius + barrier (use radius 0.9 R, barrier 0.2 R for a rope of radius R).
+        // group_ropes consecutive ropes share contact (one env); others never interact.
+        .def("set_rope_contact",
+             [](RopeBatch& b, bool enabled, float radius, float barrier, float k_collision, float mu,
+                float k_friction, float detection_scaler, int group_ropes) {
+                 if (enabled && (!(radius > 0) || !(barrier > 0) || !(k_collision > 0) || !(mu >= 0) ||
+                                 !(k_friction >= 0) || !(detection_scaler > 1) || group_ropes < 1))
+                     throw py::value_error("rope contact needs radius, barrier, k_collision > 0, mu, k_friction >= 0, "
+                                           "detection_scaler > 1, group_ropes >= 1");
+                 b.set_rope_contact(enabled, radius, barrier, k_collision, mu, k_friction, detection_scaler, group_ropes);
+             },
+             py::arg("enabled"), py::arg("radius") = 0.f, py::arg("barrier") = 0.f, py::arg("k_collision") = 0.f,
+             py::arg("mu") = 0.f, py::arg("k_friction") = 0.f, py::arg("detection_scaler") = 1.2f,
+             py::arg("group_ropes") = 1)
         .def("step_free",
              [](RopeBatch& b, float dt, int substeps) {
                  if (!(dt > 0) || substeps < 1) throw py::value_error("dt > 0 and substeps >= 1 required");

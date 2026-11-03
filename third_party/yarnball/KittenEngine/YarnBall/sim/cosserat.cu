@@ -150,6 +150,9 @@ namespace YarnBall {
 				vec3 ddpos = mix(dx, p1dx, uv.x) - mix(db0, db1, uv.y);
 				vec3 normal = dpos + ddpos;
 				float d = length(normal);
+				// Local patch (ropesim): exactly coincident centerlines have no
+				// contact normal; skip instead of normalizing 0 (NaN).
+				if (!(d > 0.f)) continue;
 				normal *= (1 / d);
 
 				uv.y = uv.x;

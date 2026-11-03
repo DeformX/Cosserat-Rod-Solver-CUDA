@@ -1,6 +1,6 @@
-"""Rod-plane contact: analytic checks (support force, Coulomb stick/slip,
-static vs kinetic friction, impact) plus the contact-off / batch bitwise
-guarantees and the scene helpers (pins, free roots).
+"""Rod-plane and rope-rope contact: analytic checks (support force, Coulomb
+stick/slip, static vs kinetic friction, no pass-through) plus the
+contact-off / batch bitwise guarantees.
 
 Rope: 21 vertices x 5 cm, rho 0.117 kg/m, EA 11.5 kN, EI 4.5e-3 (DeformY's
 rope_A fit), radius 6.35 mm, h = 1/6000 s, 16 iterations, contact kappa = 2
@@ -18,6 +18,22 @@ H, ITR, G = 1.0 / 6000.0, 16, 9.81
 KAPPA, VSLIP = 2.0, 1e-3                   # contact stiffness k_i = m_i (kappa/h)^2 (defaults)
 M_INT = RHO * SEG
 PEN0 = G * H * H / KAPPA ** 2              # rest penetration under full weight (any vertex mass)
+# rope-rope: contact at 2R (radius 0.9R + barrier 0.2R)
+RR = dict(radius=0.9 * R, barrier=0.2 * R, k_collision=0.025, k_friction=1e7)
+
+
+def seg_dist(p0, p1, q0, q1):
+    """Exact closest distance between segments p0p1 and q0q1 (broadcasting)."""
+    d1, d2, r = p1 - p0, q1 - q0, p0 - q0
+    a, e, f = (d1 * d1).sum(-1), (d2 * d2).sum(-1), (d2 * r).sum(-1)
+    c, bb = (d1 * r).sum(-1), (d1 * d2).sum(-1)
+    den = a * e - bb * bb
+    s = np.where(den > 1e-12, np.clip((bb * f - c * e) / np.maximum(den, 1e-12), 0, 1), 0.0)
+    tt = (bb * s + f) / np.maximum(e, 1e-12)
+    s = np.where(tt < 0, np.clip(-c / np.maximum(a, 1e-12), 0, 1),
+                 np.where(tt > 1, np.clip((bb - c) / np.maximum(a, 1e-12), 0, 1), s))
+    tt = np.clip(tt, 0, 1)
+    return np.linalg.norm(p0 + d1 * s[..., None] - (q0 + d2 * tt[..., None]), axis=-1)
 
 
 def free_rope(gravity, plane_w, mu_s, mu_k):
@@ -132,6 +148,78 @@ def test_batch_plane_contact_matches_single_env():
     one = run(1)
     assert (one[:, 2] < 0.05).any() and (one[:, 2] > R - 1e-4).all()   # on the floor, not through it
     assert np.array_equal(one, run(4))
+
+
+def test_rope_rope_no_passthrough():
+    """Rope B's root circles rope A: the ropes wind around each other but never interpenetrate."""
+    b = batch([[0.0, 0.0, 1.1], [0.08, 0.0, 1.1]])
+    b.set_rope_contact(True, RR["radius"], RR["barrier"], RR["k_collision"], 0.4, RR["k_friction"], 1.2, 2)
+    w = 2 * np.pi * 0.5
+    closest = np.inf
+    for f in range(90):                                # 1.5 s
+        t0, t1 = f / 60, (f + 1) / 60
+        pa = np.array([0.0, 0.0, 1.1])
+        pb0 = np.array([0.08 * np.cos(w * t0), 0.08 * np.sin(w * t0), 1.1])
+        pb1 = np.array([0.08 * np.cos(w * t1), 0.08 * np.sin(w * t1), 1.1])
+        p0 = torch.tensor(np.stack([pa, pb0]), device="cuda", dtype=torch.float32)
+        p1 = torch.tensor(np.stack([pa, pb1]), device="cuda", dtype=torch.float32)
+        v = (p1 - p0) * 60
+        b.step(p0, v.contiguous(), 1 / 60, 100, root_pos_end=p1)
+        P = torch.as_tensor(b.positions()).cpu().numpy()
+        closest = min(closest, seg_dist(P[0, :-1, None], P[0, 1:, None], P[1, None, :-1], P[1, None, 1:]).min())
+    assert closest > 2 * RR["radius"]                  # barrier wall 11.43 mm; contact at 12.7 mm
+
+
+@pytest.mark.parametrize("mu,expect_slide", [(0.5, False), (0.2, True)])
+def test_rope_on_rope_coulomb(mu, expect_slide):
+    """Rope B lies on rope A on a 20 deg slope; A grips the floor. B obeys Coulomb with the rope-rope mu."""
+    th = np.radians(20.0)
+    zA = R - PEN0 * np.cos(th)
+    zB = zA + 2 * RR["radius"] + 0.97 * RR["barrier"]
+    pos = np.zeros((2, NV, 3), np.float32)
+    pos[:, :, 0] = np.arange(NV) * SEG
+    pos[0, :, 2], pos[1, :, 2] = zA, zB
+    b = ropesim.RopeBatch.from_positions(pos, RHO, EA, EI, H, ITR, pinned=np.zeros(NV, bool))   # both free
+    b.damping = 0.0
+    b.drag = 0.0
+    b.set_planes(np.array([[0.0, 0.0, 1.0, 0.0]], np.float32), radius=R, mu_s=1.0)
+    b.set_rope_contact(True, RR["radius"], RR["barrier"], RR["k_collision"], mu, RR["k_friction"], 1.2, 2)
+    b.set_gravity(np.array([G * np.sin(th), 0.0, -G * np.cos(th)]))
+    m = 1.0 / b.inv_masses()
+    ts, vB = [], []
+    for f in range(36):                                # 0.3 s: B stays on A
+        b.step_free(1 / 120, 50)
+        V = torch.as_tensor(b.velocities()).cpu().numpy()
+        ts.append((f + 1) / 120)
+        vB.append((m[1][:, None] * V[1]).sum(0)[0] / m[1].sum())
+    ts, vB = np.array(ts), np.array(vB)
+    a = np.polyfit(ts[ts > 0.05], vB[ts > 0.05], 1)[0]
+    if expect_slide:
+        assert a == pytest.approx(G * (np.sin(th) - mu * np.cos(th)), rel=0.02)
+    else:
+        assert abs(a) < 2e-3
+
+
+def test_rope_contact_groups_isolate_envs():
+    """Two envs at the same spot do not see each other (group = 1 rope)."""
+    def run(n):
+        b = batch([[0.0, 0.0, 1.1]] * n)
+        b.set_rope_contact(True, RR["radius"], RR["barrier"], RR["k_collision"], 0.4, RR["k_friction"], 1.2, 1)
+        for f in range(30):
+            p = torch.tensor([[0.0, 0.0, 1.1]] * n, device="cuda")
+            v = torch.zeros(n, 3, device="cuda")
+            if n == 2:                                 # env 1 swings straight through env 0's rope
+                t0, t1 = f / 60, (f + 1) / 60
+                p1 = p.clone(); p1[1, 0] = 0.3 * np.sin(6 * t1)
+                p[1, 0] = 0.3 * np.sin(6 * t0); v[1, 0] = (p1[1, 0] - p[1, 0]) * 60
+                b.step(p.contiguous(), v.contiguous(), 1 / 60, 100, root_pos_end=p1.contiguous())
+            else:
+                b.step(p, v, 1 / 60, 100, root_pos_end=p)
+        return torch.as_tensor(b.positions()).cpu().numpy()[0]
+    out1 = run(1)
+    out2 = run(2)
+    assert np.isfinite(out2).all()
+    assert np.array_equal(out1, out2)
 
 
 def test_rope_built_along_minus_x_is_finite():
@@ -253,3 +341,12 @@ def test_set_masses_keeps_pins():
     im = b.inv_masses()
     assert (im[pin] == 0).all() and np.allclose(im[~pin], 100.0)
 
+
+def test_rope_contact_rejects_radii_longer_than_segments():
+    """2 * radius + barrier must fit in 2 * shortest segment; a rejected call leaves the batch usable."""
+    b = batch([[0.0, 0.0, 1.0]])
+    with pytest.raises(ValueError):
+        b.set_rope_contact(True, SEG, SEG, RR["k_collision"], 0.4, RR["k_friction"], 1.2, 1)
+    p = torch.tensor([[0.0, 0.0, 1.0]], device="cuda")
+    b.step(p, torch.zeros_like(p), 1 / 60, 100)
+    assert torch.isfinite(torch.as_tensor(b.positions())).all()

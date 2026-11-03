@@ -8,6 +8,46 @@
 #include "batch.h"
 
 namespace YarnBall {
+// Rope-rope contact: per-group brute-force broad+narrow
+// phase. Same candidate test as collision.cu buildCollisionList (closest
+// distance between segment centerlines < sum of the padded detection radii,
+// |i-j| > 2, glue exemption) but restricted to segments of the same contact
+// group (an env), written to the same d_numCols / d_collisions layout that
+// cosseratItr and recomputeStepLimit consume. One thread per segment scans its
+// group in ascending j: no atomics (deterministic list order), no host sync,
+// fixed launch size (CUDA-graph safe).
+__global__ void bruteDetectK(MetaData* data, int groupVerts, int ropeVerts, int* errorReturn) {
+    const int i = threadIdx.x + blockIdx.x * blockDim.x;
+    const int n = data->numVerts;
+    if (i >= n) return;
+    const uint32_t* flags = data->d_lastFlags;
+    if (!(flags[i] & (uint32_t)VertexFlags::hasNext)) { data->d_numCols[i] = 0; return; }
+    const int g0 = (i / groupVerts) * groupVerts;
+    const int g1 = min(g0 + groupVerts, n);
+    const vec3* P = data->d_lastPos;
+    const float* pads = data->d_paddingSize;
+    const vec3 a0 = P[i];
+    const vec3 a1 = P[i + 1] - a0;
+    const float ri = fmaxf(pads[i], pads[i + 1]);
+    const int c0 = data->d_lastCID[i], c1 = data->d_lastCID[i + 1];
+    int cnt = 0;
+    for (int j = g0; j < g1; j++) {
+        if (!(flags[j] & (uint32_t)VertexFlags::hasNext)) continue;
+        if (j / ropeVerts == i / ropeVerts && abs(j - i) <= 2) continue;   // neighbours on the SAME rope only
+        if (c0 == j || c1 == j || c0 == j + 1 || c1 == j + 1) continue;
+        const vec3 b0 = P[j] - a0, b1 = P[j + 1] - a0;
+        const vec2 uv = Kit::segmentClosestPoints(vec3(0), a1, b0, b1);
+        const vec3 d = uv.x * a1 - mix(b0, b1, uv.y);
+        const float r = ri + fmaxf(pads[j], pads[j + 1]);
+        if (Kit::length2(d) < r * r) {
+            if (cnt < MAX_COLLISIONS_PER_SEGMENT) data->d_collisions[i + n * cnt] = j;
+            cnt++;
+        }
+    }
+    if (cnt > MAX_COLLISIONS_PER_SEGMENT) errorReturn[0] = Sim::ERROR_MAX_COLLISIONS_PER_SEGMENT_EXCEEDED;
+    data->d_numCols[i] = min(cnt, MAX_COLLISIONS_PER_SEGMENT);
+}
+
 // Befriended by Sim (our YarnBall-Linux patch): exposes exactly what
 // Sim::advance() does internally, so RopeBatch can run the substep loop
 // itself and inject a root-motion-program kernel between substeps.
@@ -20,12 +60,18 @@ public:
         s->meta.h = h;
         s->uploadMeta();
     }
-    // One substep, identical to advance()'s loop body (collisions off).
-    static void substep(Sim* s) {
+    // One substep, identical to advance()'s loop body (collisions off) when
+    // ropeContact is false. With ropeContact, rope-rope candidates come from
+    // the per-group brute-force detector (bruteDetectK) instead of YarnBall's
+    // LBVH, which syncs the host every detection and knows nothing of envs.
+    static void substep(Sim* s, bool ropeContact = false, int groupVerts = 0, int ropeVerts = 0) {
         s->startIterate();
+        if (ropeContact)
+            bruteDetectK<<<(s->meta.numVerts + 127) / 128, 128, 0, s->stream>>>(s->d_meta, groupVerts, ropeVerts, s->d_error);
         cudaGraphLaunch(s->stepGraph, s->stream);
         s->stepCounter++;
     }
+    static void forceGraphRebuild(Sim* s) { s->lastItr = -1; }
     static void finish(Sim* s, float dt) {
         s->meta.time += dt;
         s->checkErrors();
@@ -239,6 +285,14 @@ void RopeBatch::step(const float* d_root_pos, const float* d_root_vel,
         sim->meta.d_verts, sim->meta.d_vels, sim->meta.d_qs,
         d_root_pos, d_root_vel, d_root_q, N, V);
 
+    if (ropeContact) {   // same substeps as advance(), plus rope-rope detection
+        YarnBall::SimAccess::prepare(sim.get(), dt / substeps);
+        for (int i = 0; i < substeps; i++)
+            YarnBall::SimAccess::substep(sim.get(), true, groupVerts, V);
+        YarnBall::SimAccess::finish(sim.get(), dt);
+        gather_nolock();
+        return;
+    }
     // exactly `substeps` substeps of h = dt/substeps (max_h restored after)
     const float oldMaxH = sim->maxH;
     sim->maxH = (dt / substeps) * 1.000001f;
@@ -288,11 +342,33 @@ void RopeBatch::step_program(const float* d_p0, const float* d_v0,
             sim->meta.d_verts, sim->meta.d_vels, sim->meta.d_qs,
             P0, V0, P1, d_q0 ? Q0 : nullptr, d_q1 ? Q1 : nullptr,
             i, substeps, h, dt, N, V);
-        YarnBall::SimAccess::substep(sim.get());
+        YarnBall::SimAccess::substep(sim.get(), ropeContact, groupVerts, V);
     }
     YarnBall::SimAccess::finish(sim.get(), dt);
 
     gather_nolock();
+}
+
+// Rope-rope contact switch (see bruteDetectK / SimAccess::substep). YarnBall's
+// own contact model runs on the candidates: barrier, friction, step limit.
+void RopeBatch::set_rope_contact(bool enabled, float radius, float barrier, float kCollision,
+                                 float mu, float kFriction, float detectionScaler, int groupRopes) {
+    std::lock_guard<std::mutex> g(mtx_);
+    auto& m = sim->meta;
+    if (enabled) {
+        // uploadMeta() enforces this at every step; check it here so a bad call
+        // leaves the old state instead of a batch whose every step throws
+        if (2 * m.minSegLen < 2 * radius + barrier)
+            throw std::invalid_argument("rope contact needs 2 * radius + barrier <= 2 * shortest segment");
+        groupVerts = V * (groupRopes > 0 ? groupRopes : 1);
+        m.radius = radius; m.barrierThickness = barrier; m.kCollision = kCollision;
+        m.frictionCoeff = mu; m.kFriction = kFriction; m.detectionScaler = detectionScaler;
+    } else
+        checkCudaErrors(cudaMemsetAsync(m.d_numCols, 0, sizeof(int) * m.numVerts, sim->solverStream()));
+    ropeContact = enabled;
+    m.useStepSizeLimit = enabled ? 1 : 0;
+    m.detectionPeriod = -1;   // never YarnBall's LBVH detector
+    YarnBall::SimAccess::forceGraphRebuild(sim.get());   // the LIMIT variant is baked into the graph
 }
 
 // Substeps with no root program (free ropes, or roots held where they are).
@@ -301,7 +377,7 @@ void RopeBatch::step_free(float dt, int substeps) {
     const float h = dt / substeps;
     YarnBall::SimAccess::prepare(sim.get(), h);
     for (int i = 0; i < substeps; i++)
-        YarnBall::SimAccess::substep(sim.get());
+        YarnBall::SimAccess::substep(sim.get(), ropeContact, groupVerts, V);
     YarnBall::SimAccess::finish(sim.get(), dt);
     gather_nolock();
 }

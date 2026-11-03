@@ -69,6 +69,10 @@ Added at vendoring time (this repo only):
    twist projection normalized a zero vector). Now: a 180 deg turn about z, and an
    identity twist when the projection is empty. Upstream bug; output unchanged for
    every geometry that used to be finite.
+9. Rope-rope contact guard (2026-10-04): `YarnBall/sim/cosserat.cu` collision loop
+   skips a pair whose centrelines coincide exactly (the contact normal was 0/0 =
+   NaN). Rope-rope candidates now come from `csrc/batch.cu` (`bruteDetectK`, a
+   per-group detector); YarnBall's LBVH detector is unchanged but unused by ropesim.
 
 ## Updating
 
@@ -78,7 +82,7 @@ re-copy changed files, and re-apply patches 5-6: patch 5 = ONE hunk in
 (ropesim vendoring)" — missing any of the `YarnBall.cu` hunks breaks the
 headless compile (`Kitten::Mesh`/`ComputeBuffer` are forward-declared only);
 patch 6 = ONE hunk each in `YarnBall.h`, `YarnBall.cu`, and
-`sim/iteration.cu`, marked "Local patch (ropesim)". Patches 7-8 are marked
+`sim/iteration.cu`, marked "Local patch (ropesim)". Patches 7-9 are marked
 "Local patch (ropesim)" too: 7 = one hunk each in `YarnBall.h`/`YarnBall.cu` plus
 the `planeContact()` function and its call in `sim/cosserat.cu`; 8 = two hunks in
-`configure()` (`YarnBall.cu`).
+`configure()` (`YarnBall.cu`); 9 = one hunk in `sim/cosserat.cu`.
