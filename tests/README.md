@@ -88,3 +88,14 @@ so the bound can be revisited deliberately rather than silently loosened.
   future "tube as stiff segments" option — not the locked rigid-transform plan.
 - **Cantilever EI ratio**: measured 0.924/0.928 (EI=0.4/0.8) — mapping good to
   ~8% (consistent discretization bias); test band tightened to [0.80, 1.05].
+
+### Batch (M1, RopeBatch — measured 2026-06-10)
+- **Batch ≡ single-rope oracle: bitwise identical** (env 0 vs RopeSim, 1 s of
+  driven swing — same kernels over a larger flat array).
+- **Cross-talk: exactly zero** (whipped neighbor leaves a static env
+  bit-identical).
+- **Throughput: 1024 envs × 33 verts → 406 FPS (6.8× realtime)** at 50
+  substeps × 8 iters/frame on the RTX 4090, including zero-copy observation
+  gather (~416k env-steps/s on the rope side).
+- Zero-copy verified: torch tensors share the device buffers (data_ptr match,
+  step() visible through existing tensors without re-fetch).

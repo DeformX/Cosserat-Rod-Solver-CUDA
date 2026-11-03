@@ -22,9 +22,11 @@
 #include <cmath>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <vector>
 
 #include "YarnBall/YarnBall.h"
+#include "batch.h"
 
 namespace py = pybind11;
 
@@ -325,6 +327,53 @@ public:
     bool fixed_root_orientation() const { return fixRootOrientation_; }
 };
 
+// ---------------- zero-copy CUDA interop (__cuda_array_interface__) --------
+
+// Parsed view of a device array handed to us by torch/cupy/numba.
+struct CaiArray {
+    uintptr_t ptr = 0;
+};
+
+// Validate + extract a float32, C-contiguous CUDA array of exactly `want`.
+CaiArray parse_cai(const py::object& obj, std::vector<py::ssize_t> want,
+                   const char* name) {
+    if (!py::hasattr(obj, "__cuda_array_interface__"))
+        throw py::value_error(std::string(name) +
+                              " must be a CUDA array (e.g. a contiguous float32 "
+                              "torch tensor on cuda)");
+    py::dict d = obj.attr("__cuda_array_interface__").cast<py::dict>();
+    const auto ts = d["typestr"].cast<std::string>();
+    if (ts != "<f4")
+        throw py::value_error(std::string(name) + " must be float32 (got " + ts + ")");
+    auto shape = d["shape"].cast<std::vector<py::ssize_t>>();
+    if (shape != want) {
+        std::string s = std::string(name) + " has wrong shape; expected (";
+        for (auto v : want) s += std::to_string(v) + ",";
+        s += ")";
+        throw py::value_error(s);
+    }
+    py::object strides_obj = d.attr("get")("strides", py::none());
+    if (!strides_obj.is_none()) {
+        auto strides = strides_obj.cast<std::vector<py::ssize_t>>();
+        py::ssize_t expect = 4;  // float32, C order
+        for (size_t i = shape.size(); i-- > 0;) {
+            if (strides[i] != expect)
+                throw py::value_error(std::string(name) + " must be C-contiguous");
+            expect *= shape[i];
+        }
+    }
+    auto data = d["data"].cast<py::tuple>();
+    return {data[0].cast<uintptr_t>()};
+}
+
+// Device buffer exposed back to Python: torch.as_tensor(view) shares the
+// memory (no copy). Keep the owning RopeBatch alive while views are in use
+// (the bindings add keep_alive, and torch holds the view object).
+struct CudaView {
+    uintptr_t ptr;
+    std::vector<py::ssize_t> shape;
+};
+
 }  // namespace
 
 PYBIND11_MODULE(_ropesim, m) {
@@ -378,4 +427,137 @@ PYBIND11_MODULE(_ropesim, m) {
         .def_property_readonly("collisions_enabled", &RopeSim::collisions_enabled)
         .def_property_readonly("fixed_root_orientation", &RopeSim::fixed_root_orientation)
         .def_property_readonly("num_verts", &RopeSim::num_verts);
+
+    py::class_<CudaView>(m, "CudaView")
+        .def_property_readonly("__cuda_array_interface__", [](const CudaView& v) {
+            py::dict d;
+            py::tuple shape(v.shape.size());
+            for (size_t i = 0; i < v.shape.size(); i++) shape[i] = v.shape[i];
+            d["shape"] = shape;
+            d["typestr"] = "<f4";
+            d["data"] = py::make_tuple(v.ptr, false);
+            d["strides"] = py::none();
+            d["version"] = 2;
+            return d;
+        })
+        .def_property_readonly("ptr", [](const CudaView& v) { return v.ptr; })
+        .def_property_readonly("shape", [](const CudaView& v) {
+            py::tuple t(v.shape.size());
+            for (size_t i = 0; i < v.shape.size(); i++) t[i] = v.shape[i];
+            return t;
+        });
+
+    using ropesim::RopeBatch;
+    py::class_<RopeBatch>(m, "RopeBatch")
+        .def(py::init([](int num_envs, int verts_per_rope, farray root_pos,
+                         float seg_len, farray dir, float density,
+                         float k_stretch, float k_bend, float max_h,
+                         int num_itr, bool fix_root_orientation) {
+                 if (num_envs < 1) throw py::value_error("num_envs must be >= 1");
+                 if (verts_per_rope < 3)
+                     throw py::value_error("verts_per_rope must be >= 3");
+                 if (!(seg_len > 0)) throw py::value_error("seg_len must be > 0");
+                 if (!(density > 0)) throw py::value_error("density must be > 0");
+                 if (!(k_stretch > 0)) throw py::value_error("k_stretch must be > 0");
+                 if (!(k_bend > 0))
+                     throw py::value_error("k_bend must be > 0 (0 -> NaN, see RopeSim)");
+                 if (!(max_h > 0)) throw py::value_error("max_h must be > 0");
+                 if (num_itr < 1) throw py::value_error("num_itr must be >= 1");
+                 if (root_pos.ndim() != 2 || root_pos.shape(0) != num_envs ||
+                     root_pos.shape(1) != 3)
+                     throw py::value_error("root_pos must be a host [num_envs, 3] array");
+                 glm::vec3 d3 = to_vec3(dir, "dir");
+                 if (!(glm::length(d3) > 0)) throw py::value_error("dir must be nonzero");
+                 return new RopeBatch(num_envs, verts_per_rope, seg_len,
+                                      root_pos.data(), &d3.x, density, k_stretch,
+                                      k_bend, max_h, num_itr, fix_root_orientation);
+             }),
+             py::arg("num_envs"), py::arg("verts_per_rope"),
+             py::arg("root_pos"),  // host [num_envs,3], required
+             py::arg("seg_len") = 0.02f,
+             py::arg("dir") = farray(py::cast(std::vector<float>{0, 0, -1})),
+             py::arg("density") = 0.1f, py::arg("k_stretch") = 500.0f,
+             py::arg("k_bend") = 1e-6f, py::arg("max_h") = 1.f / 3000.f,
+             py::arg("num_itr") = 8, py::arg("fix_root_orientation") = true)
+        .def("step",
+             [](RopeBatch& b, py::object root_pos, py::object root_vel, float dt,
+                int substeps, py::object root_q) {
+                 if (!(dt > 0)) throw py::value_error("dt must be > 0");
+                 if (substeps < 1) throw py::value_error("substeps must be >= 1");
+                 auto p = parse_cai(root_pos, {b.num_envs(), 3}, "root_pos");
+                 auto v = parse_cai(root_vel, {b.num_envs(), 3}, "root_vel");
+                 const float* qp = nullptr;
+                 CaiArray q;
+                 if (!root_q.is_none()) {
+                     if (!b.fix_root_orientation())
+                         throw py::value_error(
+                             "root_q requires fix_root_orientation=True");
+                     q = parse_cai(root_q, {b.num_envs(), 4}, "root_q");
+                     qp = reinterpret_cast<const float*>(q.ptr);
+                 }
+                 py::gil_scoped_release rel;
+                 b.step(reinterpret_cast<const float*>(p.ptr),
+                        reinterpret_cast<const float*>(v.ptr), qp, dt, substeps);
+             },
+             py::arg("root_pos"), py::arg("root_vel"), py::arg("dt"),
+             py::arg("substeps"), py::arg("root_q") = py::none())
+        .def("reset_envs",
+             [](RopeBatch& b, py::array_t<int, py::array::c_style | py::array::forcecast> ids) {
+                 if (ids.ndim() != 1) throw py::value_error("ids must be 1-D");
+                 auto r = ids.unchecked<1>();
+                 std::vector<int> v((size_t)r.shape(0));
+                 for (py::ssize_t i = 0; i < r.shape(0); i++) {
+                     if (r(i) < 0 || r(i) >= b.num_envs())
+                         throw py::value_error("env id out of range");
+                     v[(size_t)i] = r(i);
+                 }
+                 py::gil_scoped_release rel;
+                 b.reset_envs(v.data(), (int)v.size());
+             },
+             py::arg("ids"))
+        .def("gather", &RopeBatch::gather,
+             py::call_guard<py::gil_scoped_release>())
+        .def("positions",
+             [](RopeBatch& b) {
+                 return CudaView{b.positions_ptr(),
+                                 {b.num_envs(), b.verts_per_rope(), 3}};
+             }, py::keep_alive<0, 1>())
+        .def("velocities",
+             [](RopeBatch& b) {
+                 return CudaView{b.velocities_ptr(),
+                                 {b.num_envs(), b.verts_per_rope(), 3}};
+             }, py::keep_alive<0, 1>())
+        .def("quaternions",
+             [](RopeBatch& b) {
+                 return CudaView{b.quaternions_ptr(),
+                                 {b.num_envs(), b.verts_per_rope(), 4}};
+             }, py::keep_alive<0, 1>())
+        .def_property("drag",
+             [](RopeBatch& b) { std::lock_guard<std::mutex> g(b.mutex()); return b.raw()->meta.drag; },
+             [](RopeBatch& b, float v) { std::lock_guard<std::mutex> g(b.mutex()); b.raw()->meta.drag = v; })
+        .def_property("damping",
+             [](RopeBatch& b) { std::lock_guard<std::mutex> g(b.mutex()); return b.raw()->meta.damping; },
+             [](RopeBatch& b, float v) { std::lock_guard<std::mutex> g(b.mutex()); b.raw()->meta.damping = v; })
+        .def_property("num_itr",
+             [](RopeBatch& b) { std::lock_guard<std::mutex> g(b.mutex()); return b.raw()->meta.numItr; },
+             [](RopeBatch& b, int v) {
+                 if (v < 1) throw py::value_error("num_itr must be >= 1");
+                 std::lock_guard<std::mutex> g(b.mutex());
+                 b.raw()->meta.numItr = v;
+             })
+        .def("set_gravity",
+             [](RopeBatch& b, farray gv) {
+                 glm::vec3 g3 = to_vec3(gv, "gravity");
+                 std::lock_guard<std::mutex> g(b.mutex());
+                 b.raw()->meta.gravity = g3;
+             }, py::arg("gravity"))
+        .def_property_readonly("time",
+             [](RopeBatch& b) { std::lock_guard<std::mutex> g(b.mutex()); return b.raw()->meta.time; })
+        .def_property_readonly("last_error",
+             [](RopeBatch& b) { std::lock_guard<std::mutex> g(b.mutex()); return b.raw()->lastErrorCode; })
+        .def_property_readonly("last_warning",
+             [](RopeBatch& b) { std::lock_guard<std::mutex> g(b.mutex()); return b.raw()->lastWarningCode; })
+        .def_property_readonly("num_envs", &RopeBatch::num_envs)
+        .def_property_readonly("verts_per_rope", &RopeBatch::verts_per_rope)
+        .def_property_readonly("fixed_root_orientation", &RopeBatch::fix_root_orientation);
 }
