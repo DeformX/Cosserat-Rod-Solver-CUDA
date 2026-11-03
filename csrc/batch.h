@@ -41,8 +41,20 @@ public:
     // One control frame: write root pos/vel (and quat if non-null) from
     // device float32 arrays [N,3]/[N,3]/[N,4], run exactly `substeps`
     // substeps of h = dt/substeps, then refresh the observation buffers.
+    // Constant-velocity sweep (the validated legacy path, via Sim::advance).
     void step(const float* d_root_pos, const float* d_root_vel,
               const float* d_root_q, float dt, int substeps);
+
+    // One control frame with a SECOND-ORDER root motion program: the root
+    // follows p(tau) = p0 + v0*tau + 0.5*a*tau^2 with a chosen to land
+    // exactly on p1 at tau=dt (v0 = the MEASURED root-point velocity at the
+    // frame start -> C1-continuous driving up to O(dt^2)), and the root frame
+    // is SLERPed q0 -> q1 per substep. q0/q1 may be null (orientation
+    // untouched) or q1 null (q0 held). Runs the substep loop itself
+    // (YarnBall::SimAccess) to inject the program kernel between substeps.
+    void step_program(const float* d_p0, const float* d_v0, const float* d_p1,
+                      const float* d_q0, const float* d_q1,
+                      float dt, int substeps);
 
     // Restore the construction-time state (pos/orientation, zero velocities)
     // for the given env indices (host array, pre-validated). Observation
@@ -80,6 +92,11 @@ private:
     float* d_outPos = nullptr;       // [N*V*3] gathered positions
     float* d_outVel = nullptr;       // [N*V*3] gathered velocities
     int* d_ids = nullptr;            // [N] scratch for reset indices
+    float* d_prog = nullptr;         // [17*N] staged motion program
+                                     // (p0,v0,p1:3N each; q0,q1:4N each) —
+                                     // copied from caller tensors at step
+                                     // entry so the 50 launches read stable
+                                     // memory
 
     std::mutex mtx_;
 };

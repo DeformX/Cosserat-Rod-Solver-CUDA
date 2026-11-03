@@ -481,7 +481,8 @@ PYBIND11_MODULE(_ropesim, m) {
              py::arg("num_itr") = 8, py::arg("fix_root_orientation") = true)
         .def("step",
              [](RopeBatch& b, py::object root_pos, py::object root_vel, float dt,
-                int substeps, py::object root_q) {
+                int substeps, py::object root_q, py::object root_pos_end,
+                py::object root_q_end) {
                  if (!(dt > 0)) throw py::value_error("dt must be > 0");
                  if (substeps < 1) throw py::value_error("substeps must be >= 1");
                  auto p = parse_cai(root_pos, {b.num_envs(), 3}, "root_pos");
@@ -495,12 +496,41 @@ PYBIND11_MODULE(_ropesim, m) {
                      q = parse_cai(root_q, {b.num_envs(), 4}, "root_q");
                      qp = reinterpret_cast<const float*>(q.ptr);
                  }
+                 if (root_pos_end.is_none()) {
+                     // legacy: constant-velocity sweep, root_q held
+                     if (!root_q_end.is_none())
+                         throw py::value_error(
+                             "root_q_end requires root_pos_end (the motion-"
+                             "program path)");
+                     py::gil_scoped_release rel;
+                     b.step(reinterpret_cast<const float*>(p.ptr),
+                            reinterpret_cast<const float*>(v.ptr), qp, dt,
+                            substeps);
+                     return;
+                 }
+                 // second-order program: root_vel is the MEASURED root-point
+                 // velocity at frame start; the quadratic lands on
+                 // root_pos_end; orientation SLERPs root_q -> root_q_end.
+                 auto p1 = parse_cai(root_pos_end, {b.num_envs(), 3},
+                                     "root_pos_end");
+                 const float* q1p = nullptr;
+                 CaiArray q1;
+                 if (!root_q_end.is_none()) {
+                     if (qp == nullptr)
+                         throw py::value_error("root_q_end requires root_q");
+                     q1 = parse_cai(root_q_end, {b.num_envs(), 4}, "root_q_end");
+                     q1p = reinterpret_cast<const float*>(q1.ptr);
+                 }
                  py::gil_scoped_release rel;
-                 b.step(reinterpret_cast<const float*>(p.ptr),
-                        reinterpret_cast<const float*>(v.ptr), qp, dt, substeps);
+                 b.step_program(reinterpret_cast<const float*>(p.ptr),
+                                reinterpret_cast<const float*>(v.ptr),
+                                reinterpret_cast<const float*>(p1.ptr),
+                                qp, q1p, dt, substeps);
              },
              py::arg("root_pos"), py::arg("root_vel"), py::arg("dt"),
-             py::arg("substeps"), py::arg("root_q") = py::none())
+             py::arg("substeps"), py::arg("root_q") = py::none(),
+             py::arg("root_pos_end") = py::none(),
+             py::arg("root_q_end") = py::none())
         .def("reset_envs",
              [](RopeBatch& b, py::array_t<int, py::array::c_style | py::array::forcecast> ids) {
                  if (ids.ndim() != 1) throw py::value_error("ids must be 1-D");

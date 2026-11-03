@@ -99,3 +99,9 @@ so the bound can be revisited deliberately rather than silently loosened.
   gather (~416k env-steps/s on the rope side).
 - Zero-copy verified: torch tensors share the device buffers (data_ptr match,
   step() visible through existing tensors without re-fetch).
+- **Second-order root driving** (quadratic on measured start velocity +
+  per-substep SLERP): endpoint-exact (2e-6), degenerates to the legacy sweep
+  at a=0 (8e-7), and tracks a same-h 120 Hz reference at **0.001%L vs
+  0.068%L** for constant-velocity 60 Hz driving (~68×). Lesson encoded in the
+  test: control-rate comparisons must hold substep size h fixed — the
+  solver's h-sensitive dissipation otherwise dominates the measurement.

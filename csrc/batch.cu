@@ -6,6 +6,32 @@
 
 #include "batch.h"
 
+namespace YarnBall {
+// Befriended by Sim (our YarnBall-Linux patch): exposes exactly what
+// Sim::advance() does internally, so RopeBatch can run the substep loop
+// itself and inject a root-motion-program kernel between substeps.
+class SimAccess {
+public:
+    // Everything advance() does before its substep loop.
+    static void prepare(Sim* s, float h) {
+        s->rebuildCUDAGraph();   // no-op unless numItr changed
+        s->meta.lastH = s->meta.h;
+        s->meta.h = h;
+        s->uploadMeta();
+    }
+    // One substep, identical to advance()'s loop body (collisions off).
+    static void substep(Sim* s) {
+        s->startIterate();
+        cudaGraphLaunch(s->stepGraph, s->stream);
+        s->stepCounter++;
+    }
+    static void finish(Sim* s, float dt) {
+        s->meta.time += dt;
+        s->checkErrors();
+    }
+};
+}  // namespace YarnBall
+
 namespace ropesim {
 
 using YarnBall::Vertex;
@@ -27,6 +53,56 @@ __global__ void applyRootsK(Vertex* verts, glm::vec3* vels, Kit::Rotor* qs,
         float l2 = glm::dot(q, q);
         q = (l2 > 0.f) ? q * rsqrtf(l2) : glm::vec4(0, 0, 0, 1);
         qs[root] = Kit::Rotor(q);  // fixed frames are never renormalized by the solver
+    }
+}
+
+__device__ glm::vec4 slerp4(glm::vec4 a, glm::vec4 b, float t) {
+    float d = glm::dot(a, b);
+    if (d < 0.f) { b = -b; d = -d; }                 // shortest arc
+    if (d > 0.9995f)                                 // nearly parallel: nlerp
+        return glm::normalize(glm::mix(a, b, t));
+    const float th = acosf(fminf(d, 1.f));
+    const float s = sinf(th);
+    return (sinf((1.f - t) * th) / s) * a + (sinf(t * th) / s) * b;
+}
+
+// Second-order root motion program, one thread per env, launched once per
+// substep s. Position: p(tau) = p0 + v0*tau + 0.5*a*tau^2 with
+// a = 2*((p1-p0) - v0*dt)/dt^2 (lands exactly on p1). The position is
+// written analytically each substep (no drift) and the velocity is sampled
+// at the substep MIDPOINT so the solver's pos += h*vel reproduces the
+// quadratic exactly. Orientation: SLERP q0->q1 evaluated at the substep end.
+__global__ void applyRootProgramK(Vertex* verts, glm::vec3* vels,
+                                  Kit::Rotor* qs, const float* p0,
+                                  const float* v0, const float* p1,
+                                  const float* q0, const float* q1,
+                                  int sIdx, int nSub, float h, float dt,
+                                  int N, int V) {
+    const int e = threadIdx.x + blockIdx.x * blockDim.x;
+    if (e >= N) return;
+    const int root = e * V;
+
+    const glm::vec3 P0(p0[3 * e], p0[3 * e + 1], p0[3 * e + 2]);
+    const glm::vec3 V0(v0[3 * e], v0[3 * e + 1], v0[3 * e + 2]);
+    const glm::vec3 P1(p1[3 * e], p1[3 * e + 1], p1[3 * e + 2]);
+    const glm::vec3 A = 2.f / (dt * dt) * ((P1 - P0) - V0 * dt);
+
+    const float tau = sIdx * h;
+    verts[root].pos = P0 + V0 * tau + 0.5f * tau * tau * A;
+    vels[root] = V0 + (tau + 0.5f * h) * A;
+
+    if (q0) {
+        const glm::vec4 qa(q0[4 * e], q0[4 * e + 1], q0[4 * e + 2], q0[4 * e + 3]);
+        glm::vec4 q;
+        if (q1) {
+            const glm::vec4 qb(q1[4 * e], q1[4 * e + 1], q1[4 * e + 2], q1[4 * e + 3]);
+            q = slerp4(qa, qb, float(sIdx + 1) / float(nSub));
+        } else {
+            q = qa;
+        }
+        float l2 = glm::dot(q, q);
+        q = (l2 > 0.f) ? q * rsqrtf(l2) : glm::vec4(0, 0, 0, 1);
+        qs[root] = Kit::Rotor(q);
     }
 }
 
@@ -108,6 +184,7 @@ RopeBatch::RopeBatch(int num_envs, int verts_per_rope, float seg_len,
     checkCudaErrors(cudaMalloc(&d_outPos, sizeof(float) * 3 * total));
     checkCudaErrors(cudaMalloc(&d_outVel, sizeof(float) * 3 * total));
     checkCudaErrors(cudaMalloc(&d_ids, sizeof(int) * N));
+    checkCudaErrors(cudaMalloc(&d_prog, sizeof(float) * 17 * N));
     checkCudaErrors(cudaMemcpy(d_initPos, ip.data(), sizeof(glm::vec3) * total,
                                cudaMemcpyHostToDevice));
     checkCudaErrors(cudaMemcpy(d_initQ, iq.data(), sizeof(glm::vec4) * total,
@@ -123,6 +200,7 @@ RopeBatch::~RopeBatch() {
     cudaFree(d_outPos);
     cudaFree(d_outVel);
     cudaFree(d_ids);
+    cudaFree(d_prog);
 }
 
 void RopeBatch::step(const float* d_root_pos, const float* d_root_vel,
@@ -143,6 +221,48 @@ void RopeBatch::step(const float* d_root_pos, const float* d_root_vel,
         throw;
     }
     sim->maxH = oldMaxH;
+
+    gather_nolock();
+}
+
+void RopeBatch::step_program(const float* d_p0, const float* d_v0,
+                             const float* d_p1, const float* d_q0,
+                             const float* d_q1, float dt, int substeps) {
+    std::lock_guard<std::mutex> g(mtx_);
+    cudaStream_t s = sim->solverStream();
+
+    // Stage caller inputs into our persistent buffer: the program kernel
+    // launches `substeps` times and must read stable memory even if the
+    // caller's tensors are freed right after this call returns.
+    float* P0 = d_prog;
+    float* V0 = P0 + 3 * N;
+    float* P1 = V0 + 3 * N;
+    float* Q0 = P1 + 3 * N;
+    float* Q1 = Q0 + 4 * N;
+    checkCudaErrors(cudaMemcpyAsync(P0, d_p0, sizeof(float) * 3 * N,
+                                    cudaMemcpyDeviceToDevice, s));
+    checkCudaErrors(cudaMemcpyAsync(V0, d_v0, sizeof(float) * 3 * N,
+                                    cudaMemcpyDeviceToDevice, s));
+    checkCudaErrors(cudaMemcpyAsync(P1, d_p1, sizeof(float) * 3 * N,
+                                    cudaMemcpyDeviceToDevice, s));
+    if (d_q0)
+        checkCudaErrors(cudaMemcpyAsync(Q0, d_q0, sizeof(float) * 4 * N,
+                                        cudaMemcpyDeviceToDevice, s));
+    if (d_q1)
+        checkCudaErrors(cudaMemcpyAsync(Q1, d_q1, sizeof(float) * 4 * N,
+                                        cudaMemcpyDeviceToDevice, s));
+
+    const float h = dt / substeps;  // exact; we run the loop ourselves
+    YarnBall::SimAccess::prepare(sim.get(), h);
+    const int blocks = (N + 127) / 128;
+    for (int i = 0; i < substeps; i++) {
+        applyRootProgramK<<<blocks, 128, 0, s>>>(
+            sim->meta.d_verts, sim->meta.d_vels, sim->meta.d_qs,
+            P0, V0, P1, d_q0 ? Q0 : nullptr, d_q1 ? Q1 : nullptr,
+            i, substeps, h, dt, N, V);
+        YarnBall::SimAccess::substep(sim.get());
+    }
+    YarnBall::SimAccess::finish(sim.get(), dt);
 
     gather_nolock();
 }
