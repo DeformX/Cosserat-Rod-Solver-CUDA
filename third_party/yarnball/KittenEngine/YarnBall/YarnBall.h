@@ -118,6 +118,18 @@ namespace YarnBall {
 		// See sim/iteration.cu endItr.
 		float dragQuad;			// Quadratic normal drag coefficient [1/m]
 		float dragQuadT;		// Quadratic tangential drag coefficient [1/m]
+		// Local patch (ropesim): rod-plane contact. Half-spaces n.x >= w with
+		// planes[i] = (n, w), n unit. Vertex-local penalty with stiffness
+		// k_i = m_i * (kappa / h)^2 (mass-consistent; bounce independent of h)
+		// + regularized Coulomb friction with PyElastica's static->kinetic slip
+		// blend, implicit in cosseratItr. numPlanes == 0 (default) skips it.
+		int numPlanes;
+		vec4 planes[8];
+		float contactRadius;	// rope radius R [m]
+		float contactKappa;	// contact stiffness: k_i = m_i * (kappa / h)^2
+		float contactMuS;	// static friction coefficient
+		float contactMuK;	// kinetic friction coefficient
+		float contactVSlip;	// slip speed threshold [m/s] (> 0)
 		float frictionCoeff;	// Friction coefficient for contacts
 		float kCollision;		// Stiffness of the collision
 		float kFriction;		// Stiffness of the collision

@@ -17,6 +17,10 @@ namespace YarnBall {
 		meta.drag = 0.2;
 		meta.dragQuad = 0.f;	// Local patch (ropesim): quadratic drag off by default
 		meta.dragQuadT = 0.f;
+		meta.numPlanes = 0;	// Local patch (ropesim): plane contact off
+		meta.contactRadius = 0.f; meta.contactKappa = 2.f;
+		meta.contactMuS = meta.contactMuK = 0.f;
+		meta.contactVSlip = 1e-3f;
 		meta.damping = 1e-6;
 		meta.time = 0.f;
 
@@ -140,9 +144,13 @@ namespace YarnBall {
 				// Init orientation based on minimizing twist t with 
 				// min |q1 t - q0|^2 = min |t - q1^-1 q0|^2
 				// i.e. t is just the normalized x and w components.
-				auto qq = Kit::Rotor::fromTo(vec3(1, 0, 0), normalize(seg0));
+				// Local patch (ropesim): fromTo is degenerate for an antiparallel target (NaN
+				// frames for a rope built exactly along -x); use the 180 deg turn about z.
+				const vec3 sd = normalize(seg0);
+				auto qq = (sd.x < -0.999999f) ? Kit::Rotor(vec4(0, 0, 1, 0)) : Kit::Rotor::fromTo(vec3(1, 0, 0), sd);
 				auto t = qq.inverse() * lastQ;
-				t = normalize(vec4(t.x, 0, 0, t.w));
+				// Local patch (ropesim): a 180 deg frame flip has no x/w component -> normalize(0) = NaN
+				{ const vec4 tw(t.x, 0, 0, t.w); t = (dot(tw, tw) > 1e-12f) ? Kit::Rotor(normalize(tw)) : Kit::Rotor(vec4(0, 0, 0, 1)); }
 				lastQ = qq * t;
 
 				mass += v.lRest;

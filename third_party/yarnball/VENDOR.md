@@ -55,6 +55,21 @@ Added at vendoring time (this repo only):
    arithmetic DAG unchanged (bitwise-identical output expected), so upstream
    behavior is unchanged unless enabled.
 
+7. Rod-plane contact (2026-10-04): `YarnBall/YarnBall.h` (MetaData: `numPlanes`,
+   `planes[8]`, `contactRadius`, `contactKappa`, `contactMuS`, `contactMuK`,
+   `contactVSlip`), `YarnBall/YarnBall.cu` (defaults in `Sim()`: no planes),
+   `YarnBall/sim/cosserat.cu` (`planeContact()` + its call in `cosseratItr`'s sector-0
+   block). Vertex-local penalty with stiffness m_i·(kappa/h)^2 + regularized Coulomb
+   friction with a static->kinetic blend, implicit in the per-vertex Newton step; no
+   contact damping. `numPlanes == 0` (the default) never calls it, so the legacy
+   arithmetic is unchanged (bitwise, tested).
+8. Frame-init fix (2026-10-04): `YarnBall/YarnBall.cu` `configure()` gave NaN frames
+   when a segment points exactly along -x (`Rotor::fromTo` is degenerate for an
+   antiparallel target) or when the frame flips 180 deg between segments (the
+   twist projection normalized a zero vector). Now: a 180 deg turn about z, and an
+   identity twist when the projection is empty. Upstream bug; output unchanged for
+   every geometry that used to be finite.
+
 ## Updating
 
 Diff against the upstream paths under `KittenEngine/` in YarnBall-Linux,
@@ -63,4 +78,7 @@ re-copy changed files, and re-apply patches 5-6: patch 5 = ONE hunk in
 (ropesim vendoring)" — missing any of the `YarnBall.cu` hunks breaks the
 headless compile (`Kitten::Mesh`/`ComputeBuffer` are forward-declared only);
 patch 6 = ONE hunk each in `YarnBall.h`, `YarnBall.cu`, and
-`sim/iteration.cu`, marked "Local patch (ropesim)".
+`sim/iteration.cu`, marked "Local patch (ropesim)". Patches 7-8 are marked
+"Local patch (ropesim)" too: 7 = one hunk each in `YarnBall.h`/`YarnBall.cu` plus
+the `planeContact()` function and its call in `sim/cosserat.cu`; 8 = two hunks in
+`configure()` (`YarnBall.cu`).

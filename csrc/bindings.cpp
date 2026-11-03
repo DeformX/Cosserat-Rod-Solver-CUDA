@@ -41,6 +41,31 @@ glm::vec3 to_vec3(const farray& a, const char* name) {
     return glm::vec3(b(0), b(1), b(2));
 }
 
+// Rod-plane contact (cosserat.cu planeContact). planes: [P<=8, 4] rows
+// (nx, ny, nz, w) = half-spaces n.x >= w; P = 0 turns contact off. Every row is
+// validated before anything is written, so a bad call leaves the old state.
+void write_planes(YarnBall::MetaData& m, const farray& planes, float radius, float mu_s,
+                  float mu_k, float v_slip, float kappa) {
+    if (planes.ndim() != 2 || planes.shape(1) != 4 || planes.shape(0) > 8)
+        throw py::value_error("planes must be [P<=8, 4] rows (nx, ny, nz, w): half-spaces n.x >= w");
+    const int P = (int)planes.shape(0);
+    if (P > 0 && (!(radius > 0) || !(kappa > 0) || !(mu_s >= 0) || !(mu_k >= 0) || !(v_slip > 0)))
+        throw py::value_error("plane contact needs radius > 0, kappa > 0, mu_s >= 0, mu_k >= 0, v_slip > 0");
+    auto r = planes.unchecked<2>();
+    glm::vec4 rows[8];
+    for (int i = 0; i < P; i++) {
+        glm::vec3 nrm(r(i, 0), r(i, 1), r(i, 2));
+        const float l = glm::length(nrm);
+        if (!(l > 0) || !std::isfinite(l) || !std::isfinite(r(i, 3)))
+            throw py::value_error("plane rows need a finite, nonzero normal and a finite offset");
+        rows[i] = glm::vec4(nrm / l, r(i, 3) / l);
+    }
+    for (int i = 0; i < P; i++) m.planes[i] = rows[i];
+    m.numPlanes = P;
+    m.contactRadius = radius; m.contactMuS = mu_s; m.contactMuK = mu_k;
+    m.contactVSlip = v_slip; m.contactKappa = kappa;
+}
+
 class RopeSim {
     std::unique_ptr<YarnBall::Sim> sim;  // RAII: ctor throws must not leak
     int n = 0;
@@ -194,6 +219,8 @@ public:
                                      // by the solver — enforce unit norm here
         }
         std::lock_guard<std::mutex> g(mtx_);
+        if (sim->verts[0].invMass != 0)
+            throw py::value_error("set_root drives a pinned root; this rope's root was unpinned (unpin_root)");
         sim->download();
         sim->verts[0].pos = pos;
         sim->vels[0] = vel;
@@ -310,6 +337,20 @@ public:
         sim->download();
         for (int i = 0; i < n; i++)
             sim->vels[i] = glm::vec3(b(i, 0), b(i, 1), b(i, 2));
+        sim->upload();
+    }
+
+    // --- rod-plane contact: see write_planes ------------------------------
+    void set_planes(const farray& planes, float radius, float mu_s, float mu_k, float v_slip, float kappa) {
+        std::lock_guard<std::mutex> g(mtx_);
+        write_planes(sim->meta, planes, radius, mu_s, mu_k, v_slip, kappa);
+    }
+    // Make vertex 0 a free mass (uniform segments: m0 = m1/2). Test/scene helper.
+    void unpin_root() {
+        std::lock_guard<std::mutex> g(mtx_);
+        sim->download();
+        sim->verts[0].invMass = 2.f * sim->verts[1].invMass;
+        sim->vels[0] = glm::vec3(0);
         sim->upload();
     }
 
@@ -452,6 +493,13 @@ PYBIND11_MODULE(_ropesim, m) {
         .def("set_gravity",
              [](RopeSim& s, farray g) { s.set_gravity(to_vec3(g, "gravity")); },
              py::arg("gravity"))
+        .def("set_planes",
+             [](RopeSim& s, farray planes, float radius, float mu_s, py::object mu_k, float v_slip, float kappa) {
+                 s.set_planes(planes, radius, mu_s, mu_k.is_none() ? mu_s : mu_k.cast<float>(), v_slip, kappa);
+             },
+             py::arg("planes"), py::arg("radius") = 0.f, py::arg("mu_s") = 0.5f, py::arg("mu_k") = py::none(),
+             py::arg("v_slip") = 1e-3f, py::arg("kappa") = 2.f)
+        .def("unpin_root", &RopeSim::unpin_root)
         .def_property("drag", &RopeSim::get_drag, &RopeSim::set_drag)
         .def_property("drag_quad", &RopeSim::get_drag_quad, &RopeSim::set_drag_quad)
         .def_property("drag_quad_t", &RopeSim::get_drag_quad_t, &RopeSim::set_drag_quad_t)
@@ -525,6 +573,9 @@ PYBIND11_MODULE(_ropesim, m) {
                 py::object root_q_end) {
                  if (!(dt > 0)) throw py::value_error("dt must be > 0");
                  if (substeps < 1) throw py::value_error("substeps must be >= 1");
+                 if (!b.rootsPinned)
+                     throw py::value_error("step() drives every rope's root; ropes built with a free root "
+                                           "(from_positions pinned=...) advance with step_free()");
                  auto p = parse_cai(root_pos, {b.num_envs(), 3}, "root_pos");
                  auto v = parse_cai(root_vel, {b.num_envs(), 3}, "root_vel");
                  const float* qp = nullptr;
@@ -635,6 +686,78 @@ PYBIND11_MODULE(_ropesim, m) {
                  std::lock_guard<std::mutex> g(b.mutex());
                  b.raw()->meta.numItr = v;
              })
+        // Build from arbitrary initial shapes [N, V, 3]. pinned: optional bool
+        // [N, V] (or [V] for every rope) of kinematic vertices; default = each root.
+        .def_static("from_positions",
+             [](farray pos, float density, float k_stretch, float k_bend, float max_h, int num_itr,
+                bool fix_root_orientation, py::object pinned) {
+                 if (pos.ndim() != 3 || pos.shape(2) != 3 || pos.shape(1) < 3)
+                     throw py::value_error("positions must be [num_envs, V>=3, 3]");
+                 const int N = (int)pos.shape(0), V = (int)pos.shape(1);
+                 if (!(density > 0) || !(k_stretch > 0) || !(k_bend > 0) || !(max_h > 0) || num_itr < 1)
+                     throw py::value_error("density, k_stretch, k_bend, max_h > 0 and num_itr >= 1 required");
+                 std::vector<uint8_t> pin((size_t)N * V, 0);
+                 if (pinned.is_none()) {
+                     for (int e = 0; e < N; e++) pin[(size_t)e * V] = 1;
+                 } else {
+                     auto pm = pinned.cast<py::array_t<bool, py::array::c_style | py::array::forcecast>>();
+                     const bool per_env = pm.ndim() == 2;
+                     if (!((pm.ndim() == 1 && pm.shape(0) == V) || (per_env && pm.shape(0) == N && pm.shape(1) == V)))
+                         throw py::value_error("pinned must be [V] or [num_envs, V] booleans");
+                     const bool* d = pm.data();
+                     for (int e = 0; e < N; e++)
+                         for (int v = 0; v < V; v++) pin[(size_t)e * V + v] = d[per_env ? (size_t)e * V + v : (size_t)v];
+                 }
+                 if (fix_root_orientation)
+                     for (int e = 0; e < N; e++)
+                         if (!pin[(size_t)e * V]) throw py::value_error("fix_root_orientation=True needs every root pinned");
+                 std::vector<float> roots((size_t)N * 3);
+                 auto r = pos.unchecked<3>();
+                 for (int e = 0; e < N; e++)
+                     for (int v = 0; v < V; v++) {
+                         const glm::vec3 a(r(e, v, 0), r(e, v, 1), r(e, v, 2));
+                         if (!std::isfinite(a.x) || !std::isfinite(a.y) || !std::isfinite(a.z))
+                             throw py::value_error("positions must be finite");
+                         if (v + 1 < V && !(glm::length(glm::vec3(r(e, v + 1, 0), r(e, v + 1, 1), r(e, v + 1, 2)) - a) > 0))
+                             throw py::value_error("consecutive vertices must not coincide");
+                     }
+                 for (int e = 0; e < N; e++) for (int k = 0; k < 3; k++) roots[(size_t)e * 3 + k] = r(e, 0, k);
+                 float dir3[3] = {1.f, 0.f, 0.f};
+                 return std::unique_ptr<RopeBatch>(new RopeBatch(N, V, 0.f, roots.data(), dir3, density, k_stretch,
+                                                                 k_bend, max_h, num_itr, fix_root_orientation, pos.data(),
+                                                                 pin.data()));
+             }, py::arg("positions"), py::arg("density"), py::arg("k_stretch"), py::arg("k_bend"),
+             py::arg("max_h"), py::arg("num_itr"), py::arg("fix_root_orientation") = false,
+             py::arg("pinned") = py::none())
+        .def("step_free",
+             [](RopeBatch& b, float dt, int substeps) {
+                 if (!(dt > 0) || substeps < 1) throw py::value_error("dt > 0 and substeps >= 1 required");
+                 b.stepped = true;
+                 py::gil_scoped_release rel;
+                 b.step_free(dt, substeps);
+             }, py::arg("dt"), py::arg("substeps"))
+        .def("set_velocities",
+             [](RopeBatch& b, farray v) {
+                 // Overwrite all vertex velocities [N, V, 3]. A pinned vertex's row is its
+                 // kinematic velocity (it advects pos += h*v): pass zeros to hold it.
+                 const int N = b.num_envs(), V = b.verts_per_rope();
+                 if (v.ndim() != 3 || v.shape(0) != N || v.shape(1) != V || v.shape(2) != 3)
+                     throw py::value_error("expected [num_envs, V, 3]");
+                 auto r = v.unchecked<3>();
+                 std::lock_guard<std::mutex> g(b.mutex());
+                 auto* s = b.raw(); s->download();
+                 for (int e = 0; e < N; e++)
+                     for (int i = 0; i < V; i++)
+                         s->vels[(size_t)e * V + i] = glm::vec3(r(e, i, 0), r(e, i, 1), r(e, i, 2));
+                 s->upload();
+             }, py::arg("velocities"))
+        .def("set_planes",
+             [](RopeBatch& b, farray planes, float radius, float mu_s, py::object mu_k, float v_slip, float kappa) {
+                 std::lock_guard<std::mutex> g(b.mutex());
+                 write_planes(b.raw()->meta, planes, radius, mu_s, mu_k.is_none() ? mu_s : mu_k.cast<float>(), v_slip, kappa);
+             },
+             py::arg("planes"), py::arg("radius") = 0.f, py::arg("mu_s") = 0.5f, py::arg("mu_k") = py::none(),
+             py::arg("v_slip") = 1e-3f, py::arg("kappa") = 2.f)
         .def("set_gravity",
              [](RopeBatch& b, farray gv) {
                  glm::vec3 g3 = to_vec3(gv, "gravity");
@@ -672,15 +795,19 @@ PYBIND11_MODULE(_ropesim, m) {
                  auto get = [&](int e, int v) {
                      return per_env ? m.unchecked<2>()(e, v) : m.unchecked<1>()(v);
                  };
-                 for (int e = 0; e < (per_env ? N : 1); e++)
-                     for (int v = 1; v < V; v++)
-                         if (!std::isfinite(get(e, v)) || !(get(e, v) > 0))
-                             throw py::value_error("node masses must be finite and > 0 (root column ignored)");
                  std::lock_guard<std::mutex> g(b.mutex());
                  b.raw()->download();
+                 // pinned vertices (invMass 0: each root, or from_positions' pinned
+                 // mask) stay pinned and their column is ignored
+                 auto pinned = [&](int e, int v) { return b.raw()->verts[(size_t)e * V + v].invMass == 0; };
                  for (int e = 0; e < N; e++)
-                     for (int v = 1; v < V; v++)   // v=0 is the pinned root: invMass stays 0
-                         b.raw()->verts[(size_t)e * V + v].invMass = 1.f / get(e, v);
+                     for (int v = 0; v < V; v++)
+                         if (!pinned(e, v) && (!std::isfinite(get(e, v)) || !(get(e, v) > 0)))
+                             throw py::value_error("node masses must be finite and > 0 (pinned columns ignored)");
+                 for (int e = 0; e < N; e++)
+                     for (int v = 0; v < V; v++)
+                         if (!pinned(e, v))
+                             b.raw()->verts[(size_t)e * V + v].invMass = 1.f / get(e, v);
                  b.raw()->upload();
              }, py::arg("masses"))
         .def("set_stretch_stiffnesses",

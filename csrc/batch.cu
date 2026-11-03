@@ -1,6 +1,7 @@
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
 
+#include <algorithm>
 #include <stdexcept>
 #include <vector>
 
@@ -146,7 +147,8 @@ __global__ void resetEnvsK(Vertex* verts, Kit::Rotor* qs, glm::vec3* vels,
 RopeBatch::RopeBatch(int num_envs, int verts_per_rope, float seg_len,
                      const float* root_pos_host, const float* dir3,
                      float density, float k_stretch, float k_bend,
-                     float max_h, int num_itr, bool fix_root_orientation) {
+                     float max_h, int num_itr, bool fix_root_orientation,
+                     const float* init_pos_host, const uint8_t* pinned_host) {
     N = num_envs;
     V = verts_per_rope;
     fixRootOrientation_ = fix_root_orientation;
@@ -159,10 +161,17 @@ RopeBatch::RopeBatch(int num_envs, int verts_per_rope, float seg_len,
         const glm::vec3 root(root_pos_host[3 * e], root_pos_host[3 * e + 1],
                              root_pos_host[3 * e + 2]);
         for (int v = 0; v < V; v++)
-            sim->verts[e * V + v].pos = root + float(v) * seg_len * d;
+            sim->verts[e * V + v].pos = init_pos_host
+                ? glm::vec3(init_pos_host[(e * V + v) * 3], init_pos_host[(e * V + v) * 3 + 1], init_pos_host[(e * V + v) * 3 + 2])
+                : root + float(v) * seg_len * d;
         // rope boundary + kinematic root BEFORE configure() (hard requirement)
         sim->verts[e * V + V - 1].flags = 0;
-        sim->verts[e * V].invMass = 0;
+        // pinned vertices are kinematic (invMass 0 before configure(), which
+        // then gives every free vertex its lumped mass from the real segments)
+        for (int v = 0; v < V; v++)
+            if (pinned_host ? pinned_host[e * V + v] != 0 : v == 0)
+                sim->verts[e * V + v].invMass = 0;
+        if (pinned_host && pinned_host[e * V] == 0) rootsPinned = false;
         if (fix_root_orientation)
             sim->verts[e * V].flags |= (uint32_t)VertexFlags::fixOrientation;
     }
@@ -171,8 +180,15 @@ RopeBatch::RopeBatch(int num_envs, int verts_per_rope, float seg_len,
     // uploadMeta()'s seg-length check — scale them with the discretization
     sim->meta.detectionPeriod = -1;
     sim->meta.useStepSizeLimit = 0;
-    sim->meta.radius = 0.01f * seg_len;
-    sim->meta.barrierThickness = 0.08f * seg_len;
+    float minSeg = seg_len;
+    if (init_pos_host) {   // dead collision radii scale with the shortest given segment
+        minSeg = 1e30f;
+        for (int e = 0; e < N; e++)
+            for (int v = 0; v + 1 < V; v++)
+                minSeg = std::min(minSeg, glm::length(sim->verts[e * V + v + 1].pos - sim->verts[e * V + v].pos));
+    }
+    sim->meta.radius = 0.01f * minSeg;
+    sim->meta.barrierThickness = 0.08f * minSeg;
 
     sim->configure(density);
     sim->setKStretch(k_stretch);
@@ -276,6 +292,17 @@ void RopeBatch::step_program(const float* d_p0, const float* d_v0,
     }
     YarnBall::SimAccess::finish(sim.get(), dt);
 
+    gather_nolock();
+}
+
+// Substeps with no root program (free ropes, or roots held where they are).
+void RopeBatch::step_free(float dt, int substeps) {
+    std::lock_guard<std::mutex> g(mtx_);
+    const float h = dt / substeps;
+    YarnBall::SimAccess::prepare(sim.get(), h);
+    for (int i = 0; i < substeps; i++)
+        YarnBall::SimAccess::substep(sim.get());
+    YarnBall::SimAccess::finish(sim.get(), dt);
     gather_nolock();
 }
 

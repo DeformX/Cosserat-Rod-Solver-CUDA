@@ -33,7 +33,9 @@ public:
     RopeBatch(int num_envs, int verts_per_rope, float seg_len,
               const float* root_pos_host, const float* dir3,
               float density, float k_stretch, float k_bend,
-              float max_h, int num_itr, bool fix_root_orientation);
+              float max_h, int num_itr, bool fix_root_orientation,
+              const float* init_pos_host = nullptr,    // optional [N*V*3] initial shape
+              const uint8_t* pinned_host = nullptr);   // optional [N*V] pins (default: each root)
     ~RopeBatch();
     RopeBatch(const RopeBatch&) = delete;
     RopeBatch& operator=(const RopeBatch&) = delete;
@@ -89,6 +91,13 @@ public:
     // to run once this is true. Between construction and the first step the
     // host mirror is authoritative, so download-mutate-upload is safe there.
     bool stepped = false;
+
+    // False when from_positions() left some rope's vertex 0 free: step() drives
+    // each root every substep, so the bindings then allow step_free() only.
+    bool rootsPinned = true;
+
+    // Substeps without a root program (free ropes / roots held in place).
+    void step_free(float dt, int substeps);
 
 private:
     void gather_nolock();
