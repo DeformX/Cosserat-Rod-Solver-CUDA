@@ -1,8 +1,9 @@
-"""Demo 1: 12 ropes whose ends sit on two fixed, facing circles that counter-rotate in place.
+"""Twisted cable bundle: 12 ropes whose ends sit on two fixed, facing circles that counter-rotate in place.
 
 The ropes start straight and slightly pre-tensioned; twisting pulls them into a bundle and stretches them (soft EA,
 the twist stops when the mean strain reaches the cap); hold; the ends unwind.
 Both rope ends are pinned; the pins are driven kinematically (velocity per frame). Nothing else is drawn.
+Writes a standalone HTML player (scene/viewer.py).
 """
 import argparse
 import pathlib
@@ -11,8 +12,8 @@ import time
 import numpy as np
 import ropesim
 
-from common import DEMO_DIR, Recorder, device_positions, device_velocities, drive_pinned, segment_strain, smoothstep
-from viewer import write_html, to_view
+from scene.common import DEMO_DIR, Recorder, device_positions, device_velocities, drive_pinned, segment_strain, smoothstep
+from scene.viewer import write_html, to_view
 
 p = argparse.ArgumentParser()
 p.add_argument("--out", default=f"{DEMO_DIR}/twist.html")

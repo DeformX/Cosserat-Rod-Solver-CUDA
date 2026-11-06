@@ -25,8 +25,7 @@ The solver source is vendored under `third_party/yarnball/` (headless subset, GP
 local patches listed in [VENDOR.md](third_party/yarnball/VENDOR.md)); `csrc/` holds the
 pybind11 bindings and the batched-driving, contact-detection and signed-distance kernels;
 `ropesim/` is the Python package (`sdf.py` grids, `isaac_bridge.py`), `tests/` the
-validation suite, `examples/` runnable scripts, `demos/` the showcase scenes and `docs/` the
-solver notes.
+validation suite, `examples/` runnable scripts and `docs/` the solver notes.
 
 ## Requirements
 
@@ -104,30 +103,22 @@ bridge.sync_poses(reset_env_ids); rope.step(...); bridge.apply_wrenches()       
 
 ## Examples
 
-Pure rope simulations, no Isaac Sim needed. [examples/README.md](examples/README.md) walks
-through each one with a figure of what it produces.
+Pure rope simulations, no Isaac Sim needed: four short checks against theory and three
+showcase scenes that each write a standalone HTML player. [examples/README.md](examples/README.md)
+walks through every one with a figure of what it produces.
 
 ```bash
 python examples/hanging_rope.py            # one rope settles; elongation vs m g L / 2EA
 python examples/batch_swing.py             # 1024 driven ropes and the throughput you get
 python examples/mesh_contact.py            # a rope dropped on a box, then carried by it (force readout)
 python examples/throughput.py              # solver-only frames/s sweep over the batch size
+python examples/twist.py                   # 12 ropes twisted into a bundle, held, unwound
+python examples/net.py                     # a rope net catches the Stanford bunny, a free rigid body
+python examples/strings.py                 # a Shadow Hand plucks and rakes four strings
 ```
 
 The Isaac Lab demos (two-way coupling with PhysX bodies, a rope curtain, a rope pile) and the
 UR5e rope-swing RL task are in [DeformX](https://github.com/DeformX/DeformX) under `demo/`.
-
-## Demos
-
-Three showcase scenes, each recorded with the solver and written out as a standalone HTML
-player (three.js: smooth tubes, scrub, speed, orbit). [demos/README.md](demos/README.md)
-describes the scenes, the assets they need and the output directory.
-
-```bash
-python demos/twist.py                      # 12 pre-tensioned ropes twisted into a bundle, held, unwound
-python demos/net.py                        # a 10 x 10 rope net catches a 0.75 m Stanford bunny (free rigid body)
-python demos/strings.py                    # a Shadow Hand plucks and rakes four strings (kinematic SDF links)
-```
 
 ## Performance (measured)
 

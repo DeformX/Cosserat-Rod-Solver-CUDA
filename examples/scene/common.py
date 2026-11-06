@@ -1,11 +1,11 @@
-"""Shared helpers for the demos: output location, geometry, recording, pin driving."""
+"""Shared helpers for the showcase scenes: output location, geometry, recording, pin driving."""
 import os
 import time
 
 import numpy as np
 import torch
 
-DEMO_DIR = os.environ.get("ROPE_DEMOS_DIR", os.path.expanduser("~/rope_demos"))   # outputs; assets/ and the mujoco venv live here
+DEMO_DIR = os.environ.get("ROPE_DEMOS_DIR", os.path.expanduser("~/rope_demos"))   # recordings; assets/ and the mujoco venv live here too
 
 
 def smoothstep(a):

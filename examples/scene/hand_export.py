@@ -1,4 +1,4 @@
-"""Shadow Hand (MuJoCo Menagerie) forward kinematics + mesh export for the string demo.
+"""Shadow Hand (MuJoCo Menagerie) forward kinematics + mesh export for the strings scene (examples/strings.py).
 
 Runs in a venv with mujoco (not the solver env):  python hand_export.py right_hand.xml spec.json out.npz
 spec.json:

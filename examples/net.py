@@ -1,7 +1,9 @@
-"""Demo 2: a 10 x 10 rope net (two crossing layers, every rope pinned at both ends) catches a falling Stanford bunny.
+"""Bunny on a rope net: a 10 x 10 rope net (two crossing layers, every rope pinned at both ends) catches a falling
+Stanford bunny.
 
 The bunny is a free rigid body integrated here from the wrench the rope solver reports on its
-signed-distance mesh; the exchange is sub-cycled K times per frame for stability (AGENTS 5c).
+signed-distance mesh; the exchange is sub-cycled K times per frame for stability (docs/SOLVER.md, section 5).
+Writes a standalone HTML player (scene/viewer.py).
 """
 import argparse
 import pathlib
@@ -12,9 +14,9 @@ import trimesh
 import ropesim
 from scipy.ndimage import map_coordinates
 
-from assets import close_holes, bake_closed
-from common import DEMO_DIR, Recorder, device_positions, device_velocities, quat_from_axis_angle
-from viewer import write_html, to_view, quat_to_view, quat_mul, quat_rotate
+from scene.assets import close_holes, bake_closed
+from scene.common import DEMO_DIR, Recorder, device_positions, device_velocities, quat_from_axis_angle
+from scene.viewer import write_html, to_view, quat_to_view, quat_mul, quat_rotate
 
 p = argparse.ArgumentParser()
 p.add_argument("--bunny", default=f"{DEMO_DIR}/assets/bunny.obj")

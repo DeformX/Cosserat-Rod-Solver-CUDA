@@ -1,11 +1,11 @@
-"""Demo 3: four strings of different radius, pinned and pre-tensioned at both ends, played by a Shadow Hand
+"""Robot hand on four strings: four strings of different radius, pinned and pre-tensioned at both ends, played by a Shadow Hand
 (MuJoCo Menagerie model, unmodified; kinematic, each link a signed-distance grid of its drawn mesh).
 
 The hand rests in a relaxed posture with the middle, ring and little fingertips on a string; the index finger
 sweeps across all four strings twice (joint motion, fingertip path solved by IK); then all fingers straighten and
 the hand rakes across the strings with the fingertips below them. One solver batch per string, so each string has
 its own contact radius (what is drawn is what collides). Zero gravity, no body: just strings.
-Hand kinematics come from hand_export.py run in a venv that has mujoco.
+Hand kinematics come from scene/hand_export.py run in a venv that has mujoco. Writes a standalone HTML player (scene/viewer.py).
 """
 import argparse
 import json
@@ -18,14 +18,14 @@ import trimesh
 import ropesim
 from scipy.ndimage import map_coordinates
 
-from assets import bake_closed
-from common import DEMO_DIR, Recorder, device_positions, drive_pinned, smoothstep
-from viewer import write_html, to_view, quat_to_view, quat_rotate
+from scene.assets import bake_closed
+from scene.common import DEMO_DIR, Recorder, device_positions, drive_pinned, smoothstep
+from scene.viewer import write_html, to_view, quat_to_view, quat_rotate
 
 p = argparse.ArgumentParser()
 p.add_argument("--out", default=f"{DEMO_DIR}/strings.html")
 p.add_argument("--hand_xml", default=f"{DEMO_DIR}/assets/shadow_hand/right_hand.xml", help="MuJoCo Menagerie shadow_hand/right_hand.xml")
-p.add_argument("--venv_python", default=f"{DEMO_DIR}/venv_mj/bin/python", help="python with mujoco, trimesh, scipy (runs hand_export.py)")
+p.add_argument("--venv_python", default=f"{DEMO_DIR}/venv_mj/bin/python", help="python with mujoco, trimesh, scipy (runs scene/hand_export.py)")
 p.add_argument("--work", default=f"{DEMO_DIR}/strings_work", help="where the hand spec and its kinematics export go")
 p.add_argument("--fps", type=int, default=240, help="simulation frame rate (hand poses are updated per frame)")
 p.add_argument("--record_fps", type=int, default=120)
@@ -101,7 +101,7 @@ spec = {"fps": FPS, "posture": rest, "posture_low": {"RF": [0.004, 0.0], "LF": [
 work = pathlib.Path(args.work); work.mkdir(parents=True, exist_ok=True)
 (work / "spec.json").write_text(json.dumps(spec))
 t0 = time.time()
-subprocess.run([args.venv_python, "-I", str(pathlib.Path(__file__).resolve().parent / "hand_export.py"), args.hand_xml,
+subprocess.run([args.venv_python, "-I", str(pathlib.Path(__file__).resolve().parent / "scene" / "hand_export.py"), args.hand_xml,
                 str(work / "spec.json"), str(work / "hand.npz")], check=True, cwd=pathlib.Path(args.hand_xml).parent)
 hand = np.load(work / "hand.npz")
 col_names = [n for n in hand["names"] if n not in ("rh_forearm", "rh_wrist")]
