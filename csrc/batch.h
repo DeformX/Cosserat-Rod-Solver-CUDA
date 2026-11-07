@@ -37,7 +37,7 @@ public:
               float max_h, int num_itr, bool fix_root_orientation,
               const float* init_pos_host = nullptr,    // optional [N*V*3] initial shape
               const uint8_t* pinned_host = nullptr,
-              bool straight_rest = false);   // optional [N*V] pins (default: each root)
+              bool straight_rest = false, bool deterministic = false);
     ~RopeBatch();
     RopeBatch(const RopeBatch&) = delete;
     RopeBatch& operator=(const RopeBatch&) = delete;

@@ -194,14 +194,14 @@ RopeBatch::RopeBatch(int num_envs, int verts_per_rope, float seg_len,
                      const float* root_pos_host, const float* dir3,
                      float density, float k_stretch, float k_bend,
                      float max_h, int num_itr, bool fix_root_orientation,
-                     const float* init_pos_host, const uint8_t* pinned_host, bool straight_rest)
+                     const float* init_pos_host, const uint8_t* pinned_host, bool straight_rest, bool deterministic)
     : sdf(num_envs) {
     N = num_envs;
     V = verts_per_rope;
     fixRootOrientation_ = fix_root_orientation;
     const int total = N * V;
 
-    sim = std::make_unique<YarnBall::Sim>(total);
+    sim = std::make_unique<YarnBall::Sim>(total, deterministic);
 
     glm::vec3 d = glm::normalize(glm::vec3(dir3[0], dir3[1], dir3[2]));
     for (int e = 0; e < N; e++) {

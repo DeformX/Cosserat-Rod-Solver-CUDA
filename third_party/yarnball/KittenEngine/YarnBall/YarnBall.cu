@@ -8,10 +8,12 @@
 #include <device_launch_parameters.h>
 
 namespace YarnBall {
-	Sim::Sim(int numVerts) {
+	Sim::Sim(int numVerts, bool deterministicSweeps) : deterministicSweeps(deterministicSweeps) {
 		if (numVerts < 3) throw std::runtime_error("Too little vertices");
 
 		meta.numVerts = numVerts;
+		meta.d_dxNext = nullptr;
+		meta.d_qsPrev = nullptr;
 		meta.gravity = vec3(0, -9.8, 0);
 		meta.h = maxH;
 		meta.drag = 0.2;
@@ -78,6 +80,8 @@ namespace YarnBall {
 			cudaFree(meta.d_verts);
 			cudaFree(meta.d_qs);
 			cudaFree(meta.d_dx);
+			cudaFree(meta.d_dxNext);
+			cudaFree(meta.d_qsPrev);
 			cudaFree(meta.d_vels);
 			cudaFree(meta.d_qRests);
 
@@ -210,6 +214,11 @@ namespace YarnBall {
 		cudaMalloc(&meta.d_collisions, sizeof(int) * numVerts * MAX_COLLISIONS_PER_SEGMENT);
 		cudaMalloc(&meta.d_bounds, sizeof(Kit::LBVH::aabb) * numVerts);
 		cudaMalloc(&meta.d_boundColList, sizeof(int) * numVerts * MAX_COLLISIONS_PER_SEGMENT);
+
+		if (deterministicSweeps) {
+			checkCudaErrors(cudaMalloc(&meta.d_dxNext, sizeof(vec3) * numVerts));
+			checkCudaErrors(cudaMalloc(&meta.d_qsPrev, sizeof(Kit::Rotor) * numVerts));
+		}
 
 #ifndef YARNBALL_HEADLESS	// Local patch (ropesim vendoring)
 		if (glGetStringi) {

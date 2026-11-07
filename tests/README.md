@@ -16,8 +16,9 @@ pytest tests/test_statics.py -k elongation
 |---|---|---|
 | `test_contact.py` | rod–plane and rope–rope contact (docs/SOLVER.md section 5) | torch |
 | `test_mesh_contact.py` | rod–mesh contact on signed-distance grids: box ≡ plane, posed incline, capstan, drape, thin wall, baked vs closed form, per-env poses, API | torch; one test skips without `warp` + `trimesh` |
+| `test_deterministic_sweeps.py` | Bitwise position, velocity and quaternion replay across fresh endpoint-pinned batches | torch |
 | `test_mesh_motion.py` | kinematic (moving) meshes: interpolation, moving-surface friction, teleport, force readout | torch |
-| `test_mesh_broadphase.py` | 32 meshes, candidate lists, per-mesh friction, CUDA-tensor targets, device views, review-3 regressions | torch |
+| `test_mesh_broadphase.py` | 64 meshes, candidate lists, per-mesh friction, CUDA-tensor targets, device views, review-3 regressions | torch |
 | `test_isaac_bridge_geometry.py` | the Kit-free half of the Isaac bridge: tessellated primitives, welding, shells, fillets | warp (skips otherwise) |
 
 The Isaac Lab half of the bridge has no pytest (one Kit per process, minutes to start); its

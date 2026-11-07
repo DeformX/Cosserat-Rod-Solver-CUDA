@@ -20,7 +20,7 @@ namespace YarnBall {
 	// Local patch (ropesim): surface contact (planes + posed SDF grids) lives in
 	// contact.cuh (surfacesAt), shared with the force readout in iteration.cu.
 
-	template<bool LIMIT>
+	template<bool LIMIT, bool SNAPSHOT>
 	__global__ void cosseratItr(MetaData* data) {
 		const int sid = threadIdx.x / VERTEX_PER_BLOCK;			// Sector id
 		const int ltid = threadIdx.x - sid * VERTEX_PER_BLOCK;	// Local tid
@@ -182,21 +182,20 @@ namespace YarnBall {
 		}
 		__syncthreads();
 
-		// Sum forces across the yarn segments
+		// Sum forces across the yarn segments. Thread 0 in the first
+		// sector assembles the halo segment but does not own its vertex.
+		vec4* forces = (vec4*)sharedData;
+		hess3* hessians = (hess3*)(sharedData + 4 * VERTEX_PER_BLOCK);
+		float stepLimit = INFINITY;
 		if (!sid) {
-			vec4* forces = (vec4*)sharedData;
-			hess3* hessians = (hess3*)(sharedData + 4 * VERTEX_PER_BLOCK);
-
-			float stepLimit = INFINITY;
 			if (LIMIT) stepLimit = data->d_maxStepSize[tid];
-			forces[threadIdx.x] = vec4(f2, stepLimit);
-			hessians[threadIdx.x] = H2;
+			forces[ltid] = vec4(f2, stepLimit);
+			hessians[ltid] = H2;
+		}
+		// Every thread still in the block must reach the barrier.
+		__syncthreads();
 
-			__syncthreads();
-
-			// No reason to keep thread 0 going anymore
-			if (!threadIdx.x) return;
-
+		if (!sid && ltid > 0) {
 			if (v0.flags & (uint32_t)VertexFlags::hasPrev) {
 				vec4 v = forces[threadIdx.x - 1];
 				if (LIMIT) stepLimit = min(stepLimit, v.w);
@@ -214,19 +213,26 @@ namespace YarnBall {
 					if (l > stepLimit && l > 0) dx *= stepLimit / l;
 				}
 
-				// Apply update
-				dxs[tid] = dx;
+				if constexpr (!SNAPSHOT) dxs[tid] = dx;
+			}
+			// Keep the position input stable across blocks. Prepare the
+			// quaternion input for the next sweep in the same launch.
+			if constexpr (SNAPSHOT) {
+				data->d_dxNext[tid] = dx;
+				data->d_qsPrev[tid] = data->d_qs[tid];
 			}
 		}
 	}
 
+	template<bool SNAPSHOT>
 	__global__ void quaternionLambdaItr(MetaData* data) {
 		const int tid = threadIdx.x + blockIdx.x * blockDim.x;
 		const int numVerts = data->numVerts;
 		if (tid >= numVerts || tid < 0) return;
 
 		const auto verts = data->d_verts;
-		const auto dxs = data->d_dx;
+		const auto dxs = SNAPSHOT ? data->d_dxNext : data->d_dx;
+		if constexpr (SNAPSHOT) data->d_dx[tid] = dxs[tid];
 
 		// Linear change
 		Vertex v0 = verts[tid];
@@ -243,7 +249,7 @@ namespace YarnBall {
 			v0.pos *= -2 * v0.kStretch;
 
 			vec4 b(0);
-			auto qs = data->d_qs;
+			const auto qs = SNAPSHOT ? data->d_qsPrev : data->d_qs;
 			auto qRests = data->d_qRests;
 			auto q0 = qs[tid];
 			if (v0.flags & (uint32_t)VertexFlags::hasPrev) {
@@ -262,15 +268,24 @@ namespace YarnBall {
 
 			float lambda = length(v0.pos) + length(b);
 			q0 = Kit::Rotor(normalize((Kit::Rotor(v0.pos) * Kit::Rotor(b) * Kit::Rotor(1)).v + lambda * b));
-			qs[tid] = q0;
+			data->d_qs[tid] = q0;
 		}
 	}
 
-	void Sim::iterateCosserat() {
-		if (meta.useStepSizeLimit)
-			cosseratItr<true> << <(meta.numVerts + VERTEX_PER_BLOCK - 2) / (VERTEX_PER_BLOCK - 1), BLOCK_SIZE, 0, stream >> > (d_meta);
+	template<bool SNAPSHOT>
+	void launchSweeps(MetaData* data, int numVerts, bool limit, cudaStream_t stream) {
+		const int blocks = (numVerts + VERTEX_PER_BLOCK - 2) / (VERTEX_PER_BLOCK - 1);
+		if (limit)
+			cosseratItr<true, SNAPSHOT><<<blocks, BLOCK_SIZE, 0, stream>>>(data);
 		else
-			cosseratItr<false> << <(meta.numVerts + VERTEX_PER_BLOCK - 2) / (VERTEX_PER_BLOCK - 1), BLOCK_SIZE, 0, stream >> > (d_meta);
-		quaternionLambdaItr << <(meta.numVerts + 127) / 128, 128, 0, stream >> > (d_meta);
+			cosseratItr<false, SNAPSHOT><<<blocks, BLOCK_SIZE, 0, stream>>>(data);
+		quaternionLambdaItr<SNAPSHOT><<<(numVerts + 127) / 128, 128, 0, stream>>>(data);
+	}
+
+	void Sim::iterateCosserat() {
+		if (deterministicSweeps)
+			launchSweeps<true>(d_meta, meta.numVerts, meta.useStepSizeLimit, stream);
+		else
+			launchSweeps<false>(d_meta, meta.numVerts, meta.useStepSizeLimit, stream);
 	}
 }

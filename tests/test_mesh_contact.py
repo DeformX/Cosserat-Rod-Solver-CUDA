@@ -289,12 +289,12 @@ def test_mesh_api_and_inert_cases():
         r.add_mesh(bad, g.origin, g.spacing)
     with pytest.raises(ValueError):
         r.add_mesh(*g.as_args(), quat=np.zeros(4, np.float32))
-    for _ in range(32):
-        r.add_mesh(*g.as_args(), pos=np.array([0, 0, -50.0], np.float32))
+    for index in range(64):
+        assert r.add_mesh(*g.as_args(), pos=np.array([0, 0, -50.0], np.float32)) == index
     with pytest.raises(ValueError):
-        r.add_mesh(*g.as_args())                          # 9th
+        r.add_mesh(*g.as_args())
     with pytest.raises(ValueError):
-        r.set_mesh_pose(32, np.zeros(3, np.float32), np.array([0, 0, 0, 1], np.float32))
+        r.set_mesh_pose(64, np.zeros(3, np.float32), np.array([0, 0, 0, 1], np.float32))
 
     def run(setup):
         rr = ropesim.RopeSim(num_verts=NV, seg_len=SEG, dir=np.array([1.0, 0, 0]), density=RHO,

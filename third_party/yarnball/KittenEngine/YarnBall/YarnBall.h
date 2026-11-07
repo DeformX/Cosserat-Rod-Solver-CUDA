@@ -84,6 +84,8 @@ namespace YarnBall {
 		vec4* d_qRests;
 
 		vec3* d_dx;				// Temporary delta position iterants. Stored as deltas for precision.
+		vec3* d_dxNext;				// Separate position output for deterministic sweeps.
+		Kit::Rotor* d_qsPrev;		// Orientation snapshot for deterministic sweeps.
 		vec3* d_vels;			// Velocity
 		vec3* d_lastVels;		// Velocity from the last frame
 
@@ -133,7 +135,7 @@ namespace YarnBall {
 		// Local patch (ropesim): rod-mesh contact through signed-distance grids.
 		// sdf[m].v holds phi on an (nx, ny, nz) node lattice (C order, i slowest)
 		// at origin + (i, j, k) / invH in the object's own frame; the object's pose
-		// per env is d_sdfPoses[env * 8 + m] (x_world = q * p + pos), env =
+		// per env is d_sdfPoses[env * kMaxSdf + m] (x_world = q * p + pos), env =
 		// vertex / sdfEnvVerts. Contact when phi(x) < contactRadius, with the
 		// plane term (normal = grad phi). numSdf == 0 (default) skips it.
 		struct SdfGrid { const float* v; int nx, ny, nz; vec3 origin; float h, invH; float muS, muK; };	// + its own friction
@@ -148,7 +150,7 @@ namespace YarnBall {
 		// the world frame, shortest arc). While sdfMoving != 0, initItr writes the
 		// SdfPose of substep s of S (pose at (s + 1) / S, constant velocity).
 		struct SdfMotion { vec3 p0; vec4 q0; vec3 dp; vec3 rot; };
-		enum { kMaxSdf = 32, kMaxSdfCand = 8 };	// MetaData is an unnamed struct: no static members
+		enum { kMaxSdf = 64, kMaxSdfCand = 8 };	// MetaData is an unnamed struct: no static members
 		int numSdf;
 		SdfGrid sdf[kMaxSdf];
 		SdfPose* d_sdfPoses;			// [sdfEnvs * kMaxSdf]
@@ -222,6 +224,7 @@ namespace YarnBall {
 		bool renderShaded = false;
 
 	private:
+		const bool deterministicSweeps;
 		MetaData* d_meta = nullptr;
 		int* d_error = nullptr;
 		bool initialized = false;
@@ -241,7 +244,7 @@ namespace YarnBall {
 		cudaGraphExec_t stepGraph = nullptr;
 
 	public:
-		Sim(int numVerts);
+		Sim(int numVerts, bool deterministicSweeps = false);
 		~Sim();
 
 		inline size_t stepCount() { return stepCounter; }

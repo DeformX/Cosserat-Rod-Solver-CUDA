@@ -684,7 +684,7 @@ PYBIND11_MODULE(_ropesim, m) {
              py::arg("quat") = farray(py::cast(std::vector<float>{0, 0, 0, 1})),
              py::arg("mu_s") = py::none(), py::arg("mu_k") = py::none(),
              "Add a signed-distance grid (values [nx,ny,nz] float32 at origin + ijk*spacing in the object frame, negative inside; see ropesim.sdf) "
-             "posed at pos/quat (x,y,z,w). Friction defaults to the contact material's. Needs set_contact() first; at most 32 meshes. Returns the index.")
+             "posed at pos/quat (x,y,z,w). Friction defaults to the contact material's. Needs set_contact() first; at most 64 meshes. Returns the index.")
         .def("set_mesh_friction", &RopeSim::set_mesh_friction, py::arg("index"), py::arg("mu_s"), py::arg("mu_k") = py::none(),
              "Static / kinetic friction of one mesh (mu_k defaults to mu_s).")
         .def("set_mesh_pose", &RopeSim::set_mesh_pose, py::arg("index"), py::arg("pos"), py::arg("quat"),
@@ -736,7 +736,7 @@ PYBIND11_MODULE(_ropesim, m) {
         .def(py::init([](int num_envs, int verts_per_rope, farray root_pos,
                          float seg_len, farray dir, float density,
                          float k_stretch, float k_bend, float max_h,
-                         int num_itr, bool fix_root_orientation) {
+                         int num_itr, bool fix_root_orientation, bool deterministic) {
                  if (num_envs < 1) throw py::value_error("num_envs must be >= 1");
                  if (verts_per_rope < 3)
                      throw py::value_error("verts_per_rope must be >= 3");
@@ -754,7 +754,8 @@ PYBIND11_MODULE(_ropesim, m) {
                  if (!(glm::length(d3) > 0)) throw py::value_error("dir must be nonzero");
                  return new RopeBatch(num_envs, verts_per_rope, seg_len,
                                       root_pos.data(), &d3.x, density, k_stretch,
-                                      k_bend, max_h, num_itr, fix_root_orientation);
+                                      k_bend, max_h, num_itr, fix_root_orientation,
+                                      nullptr, nullptr, false, deterministic);
              }),
              py::arg("num_envs"), py::arg("verts_per_rope"),
              py::arg("root_pos"),  // host [num_envs,3], required
@@ -762,7 +763,8 @@ PYBIND11_MODULE(_ropesim, m) {
              py::arg("dir") = farray(py::cast(std::vector<float>{0, 0, -1})),
              py::arg("density") = 0.1f, py::arg("k_stretch") = 500.0f,
              py::arg("k_bend") = 1e-6f, py::arg("max_h") = 1.f / 3000.f,
-             py::arg("num_itr") = 8, py::arg("fix_root_orientation") = true)
+             py::arg("num_itr") = 8, py::arg("fix_root_orientation") = true,
+             py::arg("deterministic") = false)
         .def("step",
              [](RopeBatch& b, py::object root_pos, py::object root_vel, float dt,
                 int substeps, py::object root_q, py::object root_pos_end,
@@ -886,7 +888,7 @@ PYBIND11_MODULE(_ropesim, m) {
         // [N, V] (or [V] for every rope) of kinematic vertices; default = each root.
         .def_static("from_positions",
              [](farray pos, float density, float k_stretch, float k_bend, float max_h, int num_itr,
-                bool fix_root_orientation, py::object pinned, bool straight_rest) {
+                bool fix_root_orientation, py::object pinned, bool straight_rest, bool deterministic) {
                  if (pos.ndim() != 3 || pos.shape(2) != 3 || pos.shape(1) < 3)
                      throw py::value_error("positions must be [num_envs, V>=3, 3]");
                  const int N = (int)pos.shape(0), V = (int)pos.shape(1);
@@ -921,13 +923,15 @@ PYBIND11_MODULE(_ropesim, m) {
                  float dir3[3] = {1.f, 0.f, 0.f};
                  return std::unique_ptr<RopeBatch>(new RopeBatch(N, V, 0.f, roots.data(), dir3, density, k_stretch,
                                                                  k_bend, max_h, num_itr, fix_root_orientation, pos.data(),
-                                                                 pin.data(), straight_rest));
+                                                                 pin.data(), straight_rest, deterministic));
              }, py::arg("positions"), py::arg("density"), py::arg("k_stretch"), py::arg("k_bend"),
              py::arg("max_h"), py::arg("num_itr"), py::arg("fix_root_orientation") = false,
              py::arg("pinned") = py::none(), py::arg("straight_rest") = false,
+             py::arg("deterministic") = false,
              "Build N ropes from vertex positions [N, V, 3]. The given geometry is also the rest shape unless "
              "straight_rest=True, which makes the rest shape a straight, untwisted rope (use it for ropes that "
-             "start folded, draped or resting on the floor).")
+             "start folded, draped or resting on the floor). deterministic=True uses stable position and "
+             "orientation sweeps. Mesh wrench sums still use floating-point atomics.")
         // Rope-rope contact: YarnBall's barrier/friction/step-limit model, fed by a
         // per-group brute-force detector. Contact starts at centreline distance
         // 2*radius + barrier (use radius 0.9 R, barrier 0.2 R for a rope of radius R).
@@ -1001,7 +1005,7 @@ PYBIND11_MODULE(_ropesim, m) {
              py::arg("mu_s") = py::none(), py::arg("mu_k") = py::none(),
              "Add a signed-distance grid (values [nx,ny,nz] float32 at origin + ijk*spacing in the object frame, negative inside; see ropesim.sdf) "
              "posed at pos/quat (x,y,z,w; [3]/[4] for every env or [N,3]/[N,4] per env). Friction defaults to the contact material's. "
-             "Needs set_contact() first; at most 32 meshes. Returns the index.")
+             "Needs set_contact() first; at most 64 meshes. Returns the index.")
         .def("set_mesh_friction",
              [](RopeBatch& b, int index, float mu_s, py::object mu_k) {
                  if (!(mu_s >= 0)) throw py::value_error("mu_s must be >= 0");
@@ -1070,12 +1074,12 @@ PYBIND11_MODULE(_ropesim, m) {
                  if (!b.sdf.forces_enabled()) throw py::value_error("enable_contact_forces(True) first");
                  return CudaView{b.sdf.contact_forces_ptr(), {b.num_envs(), b.verts_per_rope(), 3}};
              }, py::keep_alive<0, 1>(), "Device view [N,V,3] of contact_forces() (valid until the next step; torch.as_tensor shares it).")
-        .def("mesh_wrenches_view",    // device [N, 32, 6] behind mesh_wrenches() (slots >= the mesh count are zero; valid until the next step)
+        .def("mesh_wrenches_view",    // device [N, 64, 6] behind mesh_wrenches() (slots >= the mesh count are zero; valid until the next step)
              [](RopeBatch& b) {
                  std::lock_guard<std::mutex> g(b.mutex());
                  if (!b.sdf.forces_enabled()) throw py::value_error("enable_contact_forces(True) first");
                  return CudaView{b.sdf.wrenches_ptr(), {b.num_envs(), SdfStore::MAX, 6}};
-             }, py::keep_alive<0, 1>(), "Device view [N,32,6] of mesh_wrenches() (slots beyond the mesh count are zero; valid until the next step).")
+             }, py::keep_alive<0, 1>(), "Device view [N,64,6] of mesh_wrenches() (slots beyond the mesh count are zero; valid until the next step).")
         .def("contact_forces",   // [N, V, 3]: force ON each vertex (world)
              [](RopeBatch& b) {
                  std::lock_guard<std::mutex> g(b.mutex());

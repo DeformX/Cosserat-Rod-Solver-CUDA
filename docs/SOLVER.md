@@ -22,11 +22,13 @@ features were built; the control frame is 1/60 s unless stated.
 - **Substeps.** `max_h` (`RopeSim`) or `h = dt / substeps` (`RopeBatch.step`) is the solver
   substep. Always pass an explicit substep count: the solver's own `advance(dt)` rounds in
   float32 (1/60 ÷ 1/3000 gives 51 substeps, not 50).
-- **Determinism.** The Gauss–Seidel sweeps read neighbours racily, yet reset/rerun and
-  batch-vs-single comparisons are bitwise reproducible in practice without rope-rope contact
-  (one requirement: the substep size is seeded at construction and restored on reset). With
-  rope-rope contact reruns differ by ~5e-5 m after 5 s; the per-mesh wrenches use float
-  atomics and are reproducible to ~1e-7 relative.
+- **Determinism.** The default CUDA sweeps update positions and orientations in place.
+  Neighbor reads can see concurrent writes, so identical runs may diverge. Set
+  `deterministic=True` on either `RopeBatch` constructor to keep one stable input per
+  sweep. A temporary displacement array and a quaternion snapshot add 28 bytes per
+  vertex. The two original kernels still run once per iteration. This mode addresses
+  repeatability of x/v/q with identical inputs, device and binary. Per-mesh wrench sums
+  still use floating-point atomics and can differ in low bits during contact.
 - **Stability limit.** Bending stiffness of the order of a plastic tube (EI ≈ 10 N·m² at
   h = 1/3000, 2 cm segments, 0.05 kg/m) blows up under root reorientation (strains > 300%,
   internal velocities ~300 m/s masked by drag); EI = 0.4 is stable. The suite tripwires this as
@@ -138,7 +140,7 @@ kCollision 1e-5): at rope mass the friction does nothing.
 
 A mesh is a signed-distance grid in its object frame (`ropesim.sdf`: `bake_mesh` with Warp,
 `from_function`, or the closed forms `sdf_box`, `sdf_sphere`, `sdf_cylinder`, `sdf_bowl`), up to
-32 per solver, each with a pose per env and its own friction. The vertex is transformed into
+64 per solver, each with a pose per env and its own friction. The vertex is transformed into
 the object frame, φ and ∇φ come from a trilinear sample, and the same penalty and friction
 law as for planes acts along ∇φ. Grids need a margin beyond the surface (rope radius plus a
 few cells); outside the lattice there is no contact.
@@ -153,10 +155,14 @@ few cells); outside the lattice there is no contact.
 - **Contact-force readout.** `enable_contact_forces(True)` evaluates the surface law once
   more at the final displacement of every substep (the force the implicit scheme applied) and
   accumulates per-vertex forces and per-mesh wrenches about the mesh origin, averaged over the
-  frame (the impulse a rigid-body engine should receive). Cost +2–5% of a frame; planes
+  frame (the impulse a rigid-body engine should receive). The host wrench array is
+  `[N,M,6]` for `M` active meshes. The device view is `[N,64,6]` with zero padding.
+  Cost +2–5% of a frame in the original measurements. Planes
   contribute to per-vertex forces only.
 - **Broad phase.** A per-vertex candidate list rebuilt every substep from the world AABBs of
-  the (env, mesh) pairs keeps 32 meshes affordable: 1024 / 4096 ropes × 21 vertices at
+  the (env, mesh) pairs limits work in the solver sweeps. The candidate list holds eight
+  integer mesh indices and falls back to scanning every mesh on overflow. In the original
+  measurements, 1024 / 4096 ropes × 21 vertices at
   100 × 16 cost 11.9 / 17.6 ms per frame bare, 14.2 / 21.7 with one static mesh, 14.2 / 23.3 with
   it moving every frame, 14.5 / 23.4 with the readout, 17.9 / 29.0 with four moving meshes
   (shared GPU).

@@ -91,6 +91,13 @@ Added at vendoring time (this repo only):
    broad-phase candidate list whenever `numSdf > 0`). The flags default to 0 and `numSdf` to 0:
    the legacy arithmetic is unchanged (bitwise, checked).
 
+12. Mesh capacity and repeatable batched sweeps (2026-11-07): `YarnBall.h`
+    increases the shared SDF capacity from 32 to 64. The optional snapshots in
+    `sim/cosserat.cu` stage the displacement output and quaternion input in the
+    position kernel. The orientation kernel commits the displacements while
+    updating orientations from the stable snapshot. The final position barrier
+    is reached by all threads that have not exited.
+
 ## Updating
 
 Diff against the upstream paths under `KittenEngine/` in YarnBall-Linux,

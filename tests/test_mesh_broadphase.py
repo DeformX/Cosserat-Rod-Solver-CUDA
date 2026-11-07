@@ -1,5 +1,5 @@
 """Many meshes per sim (docs/SOLVER.md section 5): the per-vertex broad phase (world AABB candidates rebuilt every
-substep), the cap of 32, per-mesh friction, poses given as CUDA tensors, and the device views of the
+substep), the mesh capacity, per-mesh friction, poses given as CUDA tensors, and the device views of the
 force readout. Same rope as test_mesh_contact (rope_A, 21 x 5 cm, h = 1/6000)."""
 import numpy as np
 import pytest
@@ -83,13 +83,39 @@ def test_candidate_overflow_scans_every_mesh():
     assert sink(10) == pytest.approx(PEN0 / 10, rel=0.1)
 
 
-def test_mesh_cap_is_32():
+def test_mesh_63_supports_rope_and_preserves_per_env_wrenches():
     g = slab_grid(spacing=1 / 32)
-    b = batch(rope_rows(1))
-    for m in range(32):
-        b.add_mesh(*g.as_args(), pos=np.array([0, 0, -1.0 - m], np.float32))
+    pos = rope_rows(2, z=R - PEN0)
+    pos[1, :, 1] = 2.0
+    b = batch(pos)
+    translations = np.zeros((2, 64, 3), np.float32)
+    translations[:, :63, 0] = 5.0  # far meshes never enter the candidate list
+    translations[1, 63, 1] = 2.0
+    quats = np.tile(Q0, (2, 64, 1))
+    for m in range(64):
+        assert b.add_mesh(*g.as_args(), pos=translations[:, m], quat=quats[:, m]) == m
     with pytest.raises(ValueError):
         b.add_mesh(*g.as_args(), pos=np.array([0, 0, -40.0], np.float32))
+    b.enable_contact_forces()
+    for _ in range(20):
+        b.step_free(DT, SUB)
+
+    wrenches = b.mesh_wrenches()
+    np.testing.assert_array_equal(wrenches[:, :63], 0.0)
+    mass = (1.0 / np.asarray(b.inv_masses(), np.float64)).sum(axis=1)
+    np.testing.assert_allclose(wrenches[:, 63, 2], -mass * G, rtol=2e-3)
+    np.testing.assert_array_equal(torch.as_tensor(b.mesh_wrenches_view()).cpu(), wrenches)
+
+    # Exercise packed all-mesh pose updates at the highest slot in env 1.
+    for i in range(10):
+        translations[1, 63, 2] = (i + 1) * 0.001
+        b.set_mesh_poses_all(translations, quats)
+        b.step_free(DT, SUB)
+    np.testing.assert_allclose(P_(b)[0, :, 2], R - PEN0, atol=1e-6)
+    np.testing.assert_allclose(P_(b)[1, :, 2], R - PEN0 + 0.01, atol=5e-5)
+    wrenches = b.mesh_wrenches()
+    np.testing.assert_array_equal(wrenches[:, :63], 0.0)
+    assert np.all(wrenches[:, 63, 2] < 0)
 
 
 def test_moving_mesh_enters_and_leaves_the_rope():
@@ -194,7 +220,7 @@ def test_force_views_match_readouts():
         b.step_free(DT, SUB)
     W = b.mesh_wrenches(); F = b.contact_forces()
     Wv = torch.as_tensor(b.mesh_wrenches_view()).cpu().numpy(); Fv = torch.as_tensor(b.contact_forces_view()).cpu().numpy()
-    assert Wv.shape == (2, 32, 6) and Fv.shape == (2, NV, 3)
+    assert Wv.shape == (2, 64, 6) and Fv.shape == (2, NV, 3)
     assert np.array_equal(Wv[:, 0], W[:, 0]) and np.array_equal(Fv, F)
     assert np.abs(Wv[:, 1:]).max() == 0.0
     M = (1.0 / np.asarray(b.inv_masses(), np.float64)[0]).sum()

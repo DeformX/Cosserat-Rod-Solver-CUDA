@@ -16,7 +16,7 @@ PhysX inside NVIDIA Isaac Lab. It is the GPU engine of
 |---|---|
 | `RopeSim` | One rope with a host-driven root: the validation and experimentation API |
 | `RopeBatch` | N ropes in one flat solver. Roots are driven from CUDA tensors every control frame by a second-order motion program (start velocity + frame-end pose, SLERP orientation); positions, velocities and frames come back as zero-copy torch views; vectorized resets; per-vertex mass and stiffness |
-| Contact (opt-in) | Half-space planes; rope-rope contact; meshes as signed-distance grids (baked with Warp or from closed forms), including kinematic meshes whose pose is set every frame; per-vertex contact forces and per-mesh wrenches; up to 32 meshes with a per-vertex broad phase |
+| Contact (opt-in) | Half-space planes; rope-rope contact; meshes as signed-distance grids (baked with Warp or from closed forms), including kinematic meshes whose pose is set every frame; per-vertex contact forces and per-mesh wrenches; up to 64 meshes with a per-vertex broad phase |
 | `ropesim.isaac_bridge` | PhysX rigid bodies and articulation links become rope colliders; the rope's wrench goes back to PhysX as an external force (explicit coupling). Its demos, and the robot-arm RL task, live in [DeformX](https://github.com/DeformX/DeformX) |
 | Air drag | Linear decay plus quadratic cross-flow drag split along the segment tangent |
 | `tests/` | 124 tests against analytic ground truth (hanging elongation = EA, cantilever droop = EI, pendulum period, energy, convergence, every contact law); measured baselines in [tests/README.md](tests/README.md) |
@@ -97,6 +97,10 @@ bridge = RopeColliders(rope, scene, [ColliderSpec("robot", bodies=link_names),  
                                      ColliderSpec("box", dynamic=True, mu_s=0.8)])       # dynamic: the wrench goes back
 bridge.sync_poses(reset_env_ids); rope.step(...); bridge.apply_wrenches()               # every control frame
 ```
+
+Use `deterministic=True` when constructing a `RopeBatch` to replay positions, velocities,
+and orientations with identical inputs on the same device and build. The mode uses stable
+neighbor snapshots during the solver sweeps. Mesh wrench sums use floating-point atomics.
 
 `bake_mesh(vertices, triangles, spacing, margin)` turns any closed triangle mesh into a grid
 (Warp).
