@@ -43,7 +43,9 @@ class Recorder:
     def frames(self):
         return len(self.ropes)
 
-    def rope_array(self):
+    def rope_array(self, expected_frames):
+        if expected_frames < 1 or self.frames != expected_frames:
+            raise SystemExit(f"Incomplete recording: captured {self.frames} of {expected_frames} frames")
         return np.stack(self.ropes)   # [F, R, V, 3]
 
     def body_poses(self, name):
@@ -57,6 +59,18 @@ def device_positions(batch):
 
 def device_velocities(batch):
     return torch.as_tensor(batch.velocities()).cpu().numpy()
+
+
+def check_step(batch, stage, t):
+    error = batch.last_error
+    if error:
+        raise SystemExit(f"Simulation diverged during {stage} at t={t:.3f}s (solver error {error})")
+
+
+def require_finite(stage, t, **arrays):
+    for name, array in arrays.items():
+        if not np.isfinite(array).all():
+            raise SystemExit(f"Simulation diverged during {stage} at t={t:.3f}s (nonfinite {name})")
 
 
 def drive_pinned(batch, pinned_mask, targets_now, targets_next, dt):

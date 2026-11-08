@@ -15,7 +15,8 @@ import ropesim
 from scipy.ndimage import map_coordinates
 
 from scene.assets import close_holes, bake_closed
-from scene.common import DEMO_DIR, Recorder, device_positions, device_velocities, quat_from_axis_angle
+from scene.common import (DEMO_DIR, Recorder, check_step, device_positions, device_velocities,
+                          quat_from_axis_angle, require_finite)
 from scene.viewer import write_html, to_view, quat_to_view, quat_mul, quat_rotate
 
 p = argparse.ArgumentParser()
@@ -37,6 +38,12 @@ p.add_argument("--body_damping", type=float, default=4.0, help="bunny velocity d
 p.add_argument("--drag", type=float, default=1.5, help="rope velocity decay rate [1/s] (the dissipation knob; a real net damps through crossing friction)")
 p.add_argument("--settle", type=float, default=3.0, help="seconds the net hangs under gravity (high drag) before the bunny is released")
 args = p.parse_args()
+if min(args.fps, args.substeps, args.itr, args.exchange) < 1:
+    p.error("--fps, --substeps, --itr and --exchange must be positive")
+if args.substeps % args.exchange:
+    p.error("--substeps must be a multiple of --exchange")
+if not np.isfinite(args.duration) or round(args.duration * args.fps) < 1:
+    p.error("--duration must provide at least one recording frame")
 
 n, S, SP, R, V = 10, args.span, args.spacing, 0.01, 91
 RHO, EA, EI = 0.2, args.ea, 1e-3
@@ -94,8 +101,11 @@ for k in range(int(args.settle * FPS)):
     if k == int((args.settle - 0.5) * FPS):
         batch.drag = args.drag
     batch.step_free(DT, SUB)
+    check_step(batch, "settling", (k + 1) * DT)
 P = device_positions(batch)
-print(f"net settled {args.settle}s: max |v| {np.abs(device_velocities(batch)).max():.4f} m/s, lowest rope point {P[..., 2].min():.3f} m ({time.time() - t0:.1f}s)")
+velocities = device_velocities(batch)
+require_finite("settling", args.settle, positions=P, velocities=velocities)
+print(f"net settled {args.settle}s: max |v| {np.abs(velocities).max():.4f} m/s, lowest rope point {P[..., 2].min():.3f} m ({time.time() - t0:.1f}s)")
 
 def rot_mat(q):
     return quat_rotate(q[None], np.eye(3)).T   # columns = rotated basis vectors
@@ -113,6 +123,8 @@ for k in range(frames):
         q_next = q_next / np.linalg.norm(q_next)
         batch.set_mesh_poses(idx, p_next.astype(np.float32), q_next.astype(np.float32))
         batch.step_free(TAU, SUBK)
+        t = k * DT + (e + 1) * TAU
+        check_step(batch, "recording", t)
         W = np.asarray(batch.mesh_wrenches())[:, idx, :].sum(0)
         Fc, Tc = W[:3], W[3:]
         Rm = rot_mat(q_next)
@@ -122,8 +134,13 @@ for k in range(frames):
         if np.linalg.norm(Fc) > 1.0:                     # inelastic body: damp while touching the net
             vb = vb * np.exp(-args.body_damping * TAU); wb = wb * np.exp(-args.body_damping * TAU)
         pb, qb = p_next, q_next
+        require_finite("recording", t, bunny_position=pb, bunny_orientation=qb,
+                       bunny_velocity=vb, bunny_angular_velocity=wb, wrench=W)
+        if pb[2] < -5:
+            raise SystemExit(f"Bunny fell through the net at t={t:.3f}s (z={pb[2]:.3f} m)")
         Fsum += Fc
     P = device_positions(batch)
+    require_finite("recording", t, rope_positions=P)
     # penetration check: signed distance of every rope vertex from the bunny surface (trilinear sample, body frame)
     Rm = rot_mat(qb)
     loc = (P.reshape(-1, 3) - pb) @ Rm
@@ -134,13 +151,11 @@ for k in range(frames):
     min_gap = min(min_gap, gap)
     status = f"bunny z {pb[2]:.2f} m · contact force {np.linalg.norm(Fsum) / K:.0f} N · closest rope {gap * 1000:+.1f} mm"
     rec.frame(P, {"bunny": (pb, qb)}, status)
-    if k % (FPS // 4) == 0 or not np.isfinite(P).all():
+    if k % max(1, FPS // 4) == 0:
         print(f"t={k * DT:5.2f}s  bunny z {pb[2]:.3f}  v {np.round(vb, 2)}  |w| {np.linalg.norm(wb):.2f}  F {np.linalg.norm(Fsum) / K:7.1f} N  "
               f"rope z min {P[..., 2].min():.3f}  gap {gap * 1000:+.1f} mm  finite {np.isfinite(P).all()}  ({time.time() - t0:.1f}s)", flush=True)
-    if not np.isfinite(P).all() or not np.isfinite(pb).all() or pb[2] < -5:
-        print("DIVERGED / fell through"); break
 
-rp = rec.rope_array()
+rp = rec.rope_array(frames)
 F = rp.shape[0]
 pp, qq = rec.body_poses("bunny")
 poses = np.concatenate([to_view(pp), quat_to_view(qq)], axis=1).astype(np.float32)

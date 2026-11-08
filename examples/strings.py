@@ -9,7 +9,9 @@ Hand kinematics come from scene/hand_export.py run in a venv that has mujoco. Wr
 """
 import argparse
 import json
+import os
 import pathlib
+import shutil
 import subprocess
 import time
 
@@ -19,7 +21,7 @@ import ropesim
 from scipy.ndimage import map_coordinates
 
 from scene.assets import bake_closed
-from scene.common import DEMO_DIR, Recorder, device_positions, drive_pinned, smoothstep
+from scene.common import DEMO_DIR, Recorder, check_step, device_positions, drive_pinned, require_finite, smoothstep
 from scene.viewer import write_html, to_view, quat_to_view, quat_rotate
 
 p = argparse.ArgumentParser()
@@ -43,6 +45,18 @@ p.add_argument("--rake_lf_above", type=float, default=0.0015, help="little finge
 p.add_argument("--strokes", type=int, default=2, help="index-finger sweeps before the final rake")
 p.add_argument("--sdf_spacing", type=float, default=0.001)
 args = p.parse_args()
+if min(args.fps, args.record_fps, args.substeps, args.itr) < 1:
+    p.error("--fps, --record_fps, --substeps and --itr must be positive")
+if args.fps % args.record_fps:
+    p.error("--fps must be a multiple of --record_fps")
+hand_python = shutil.which(os.path.expanduser(args.venv_python))
+if hand_python is None:
+    p.error(f"hand exporter interpreter is not executable: {args.venv_python}")
+# Keep the venv symlink in the path so Python selects the right environment.
+hand_python = pathlib.Path(hand_python).absolute()
+hand_xml = pathlib.Path(args.hand_xml).expanduser().absolute()
+if not hand_xml.is_file():
+    p.error(f"hand model XML is missing: {hand_xml}")
 
 L, X0, NS, V = 0.9, -0.45, 4, 361
 YS = np.array([-0.045, -0.015, 0.015, 0.045])
@@ -98,15 +112,23 @@ th, ps = args.tilt, args.yaw
 c, s_, cp, sp = np.cos(th), np.sin(th), np.cos(ps), np.sin(ps)
 spec = {"fps": FPS, "posture": rest, "posture_low": {"RF": [0.004, 0.0], "LF": [0.002, 0.0]}, "anchor": "rh_mfdistal", "path": path, "joint_keys": keys,
         "finger_dir": [sp * c, -cp * c, -s_], "palm_dir": [-sp * s_, cp * s_, -c]}
-work = pathlib.Path(args.work); work.mkdir(parents=True, exist_ok=True)
+work = pathlib.Path(args.work).expanduser().absolute()
+work.mkdir(parents=True, exist_ok=True)
 (work / "spec.json").write_text(json.dumps(spec))
 t0 = time.time()
-subprocess.run([args.venv_python, "-I", str(pathlib.Path(__file__).resolve().parent / "scene" / "hand_export.py"), args.hand_xml,
-                str(work / "spec.json"), str(work / "hand.npz")], check=True, cwd=pathlib.Path(args.hand_xml).parent)
+subprocess.run([hand_python, "-I", pathlib.Path(__file__).resolve().parent / "scene" / "hand_export.py", hand_xml,
+                work / "spec.json", work / "hand.npz"], check=True, cwd=hand_xml.parent)
 hand = np.load(work / "hand.npz")
 col_names = [n for n in hand["names"] if n not in ("rh_forearm", "rh_wrist")]
 vis_names = list(hand["vis_names"])
 HF = int(hand["frames"])
+frames = int(round(DURATION * FPS))
+if HF != frames + 1:
+    raise SystemExit(f"Incomplete hand export: received {HF} of {frames + 1} poses")
+for name in sorted(set(col_names) | set(vis_names)):
+    poses = hand[f"poses_{name}"]
+    if poses.shape != (HF, 7) or not np.isfinite(poses).all():
+        raise SystemExit(f"Incomplete or nonfinite hand poses for {name}")
 print(f"hand: {len(col_names)} collision bodies, {len(vis_names)} visual bodies, {HF} frames ({time.time() - t0:.1f}s)")
 k_rest, k_rake = int((T0 + 1.2) * FPS), int((T0 + 0.5 * (RAKE_T[0] + RAKE_T[1])) * FPS)
 for n in ("rh_ffdistal", "rh_mfdistal", "rh_rfdistal", "rh_lfdistal", "rh_thdistal"):
@@ -167,35 +189,34 @@ def min_gap(P, k):
     return best
 
 rec = Recorder()
-frames = int(round(DURATION * FPS))
 t0 = time.time()
 worst_gap = np.full(NS, np.inf)
 for k in range(frames):
     t = k * DT
     tn, tx = pin_targets(t), pin_targets(t + DT)
-    kh = min(k + 1, HF - 1)
+    kh = k + 1
     for s, b in enumerate(batches):
         drive_pinned(b, pin_mask, tn[s:s + 1], tx[s:s + 1], DT)
         b.set_mesh_poses_all(hand_pos[kh][None].copy(), hand_quat[kh][None].copy())
-    for b in batches:                      # the solver does not step several sims concurrently
+    for s, b in enumerate(batches):        # the solver does not step several sims concurrently
         b.step_free(DT, SUB)
+        check_step(b, f"recording string {s + 1}", t + DT)
     if (k + 1) % REC:
         continue
     P = np.concatenate([device_positions(b) for b in batches])
+    require_finite("recording", t + DT, positions=P)
     gap = min_gap(P, kh)
     worst_gap = np.minimum(worst_gap, gap)
     bodies = {n: (hand[f"poses_{n}"][kh, :3], hand[f"poses_{n}"][kh, 3:]) for n in vis_names}
     amp = np.abs(P[:, :, 1] - YS[:, None]).max(1) * 100
     rec.frame(P, bodies, f"string sway [cm] " + " ".join(f"{a:.1f}" for a in amp) + f" · closest string–hand gap {gap.min() * 1000:+.2f} mm")
-    if (k + 1) % FPS == 0 or not np.isfinite(P).all():
+    if (k + 1) % FPS == 0:
         strain = np.linalg.norm(np.diff(P, axis=1), axis=-1) / seg - 1
         print(f"t={t:5.2f}s strain mean {100 * strain.mean():.2f}%  max |y-dev| {np.round(amp, 2)} cm  "
               f"max |z-dev| {np.round(np.abs(P[:, :, 2]).max(1) * 100, 2)} cm  gap {np.round(gap * 1000, 2)} mm  finite {np.isfinite(P).all()}  ({time.time() - t0:.1f}s)", flush=True)
-    if not np.isfinite(P).all():
-        print("DIVERGED"); break
 
 # ---- viewer ----
-rp = rec.rope_array()
+rp = rec.rope_array(frames // REC)
 F = rp.shape[0]
 meshes, bodies = {}, []
 for n in vis_names:

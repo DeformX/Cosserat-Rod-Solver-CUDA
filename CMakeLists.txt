@@ -5,15 +5,16 @@ cmake_minimum_required(VERSION 3.24)
 #   export CUDACXX=/path/to/cuda-12.8/bin/nvcc      or
 #   cmake -DCMAKE_CUDA_COMPILER=... -DCUDAToolkit_ROOT=...
 # A plain `pip install -e .` picks them up from the environment.
-project(ropesim LANGUAGES CXX CUDA)
-
 # GPU architecture: defaults to the GPU of the build machine (`native`), which
 # needs a visible GPU at configure time. For a binary that runs on several GPUs
 # pass an explicit list, e.g. -DCMAKE_CUDA_ARCHITECTURES="89;120". A wrong
 # architecture fails at RUNTIME ("no kernel image is available"), not at build time.
-if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES OR CMAKE_CUDA_ARCHITECTURES STREQUAL "")
+# Set the default before project() initializes it from the compiler.
+if((NOT DEFINED CMAKE_CUDA_ARCHITECTURES OR CMAKE_CUDA_ARCHITECTURES STREQUAL "")
+   AND "$ENV{CUDAARCHS}" STREQUAL "")
     set(CMAKE_CUDA_ARCHITECTURES native)
 endif()
+project(ropesim LANGUAGES CXX CUDA)
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)

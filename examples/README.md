@@ -119,8 +119,9 @@ The three scenes below record a simulation and write it out as a standalone HTML
 int16, smooth tubes, a scrub bar, playback speed and a slow camera orbit. Open the file in a
 browser with internet access (three.js is fetched). They share the code in [`scene/`](scene/): the player (`viewer.py`,
 `viewer_core.js`), recording and pin driving (`common.py`), mesh preparation (`assets.py`)
-and the Shadow Hand kinematics (`hand_export.py`). The solver environment needs `trimesh`
-and `scipy` as well as `ropesim`.
+and the Shadow Hand kinematics (`hand_export.py`). All three need CUDA PyTorch. The net and
+strings scenes also need `trimesh`, `scipy` and the Warp mesh baker (`ropesim[bake]`). A
+failed or incomplete simulation exits with a diagnostic before publishing a replay.
 
 Recordings and assets live in one directory, `$ROPE_DEMOS_DIR` (default `~/rope_demos`):
 

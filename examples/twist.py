@@ -12,7 +12,8 @@ import time
 import numpy as np
 import ropesim
 
-from scene.common import DEMO_DIR, Recorder, device_positions, device_velocities, drive_pinned, segment_strain, smoothstep
+from scene.common import (DEMO_DIR, Recorder, check_step, device_positions, device_velocities,
+                          drive_pinned, require_finite, segment_strain, smoothstep)
 from scene.viewer import write_html, to_view
 
 p = argparse.ArgumentParser()
@@ -29,6 +30,12 @@ p.add_argument("--fps", type=int, default=60)
 p.add_argument("--drag", type=float, default=0.5, help="rope velocity decay rate [1/s] during the recording")
 p.add_argument("--settle", type=float, default=4.0, help="seconds of settling under gravity (high drag) before recording")
 args = p.parse_args()
+if min(args.fps, args.substeps, args.itr) < 1:
+    p.error("--fps, --substeps and --itr must be positive")
+if not np.isfinite(args.duration) or round(args.duration * args.fps) < 1:
+    p.error("--duration must provide at least one recording frame")
+if not np.isfinite(args.strain_cap) or args.strain_cap <= 0:
+    p.error("--strain_cap must be finite and positive")
 
 N, Rp, D, V, R = 12, 0.10, 0.8, 61, 0.008
 RHO, EA, EI = 0.06, args.ea, 2e-4
@@ -84,8 +91,11 @@ for k in range(int(args.settle * FPS)):
         batch.drag = args.drag
     drive_pinned(batch, pin_mask, ends_at(k * DT), ends_at((k + 1) * DT), DT)
     batch.step_free(DT, SUB)
+    check_step(batch, "settling", (k + 1) * DT)
 P = device_positions(batch)
-print(f"settled {args.settle}s: max |v| {np.abs(device_velocities(batch)).max():.4f} m/s, mid z {P[:, V // 2, 2].min():.3f}..{P[:, V // 2, 2].max():.3f} m ({time.time() - t0:.1f}s)")
+velocities = device_velocities(batch)
+require_finite("settling", args.settle, positions=P, velocities=velocities)
+print(f"settled {args.settle}s: max |v| {np.abs(velocities).max():.4f} m/s, mid z {P[:, V // 2, 2].min():.3f}..{P[:, V // 2, 2].max():.3f} m ({time.time() - t0:.1f}s)")
 
 rec = Recorder()
 frames = int(round(T_END * FPS))
@@ -104,8 +114,10 @@ for k in range(frames):
         a1 = a_hold * (1 - smoothstep((t - t_unwind0) / T_UNWIND)) if t >= t_unwind0 else a_hold
     drive_pinned(batch, pin_mask, pin_targets(a), pin_targets(a1), DT)
     batch.step_free(DT, SUB)
+    check_step(batch, "recording", t + DT)
     a = a1
     P = device_positions(batch)
+    require_finite("recording", t + DT, positions=P)
     strain = segment_strain(P, rest)
     strain_mean = float(strain.mean())
     status = f"twist {2 * a / (2 * np.pi):.2f} turns · mean strain {100 * strain_mean:.1f}%"
@@ -113,11 +125,9 @@ for k in range(frames):
     if k % FPS == 0:
         print(f"t={t:5.2f}s  twist {2 * a / (2 * np.pi):.2f} turns  strain mean {100 * strain_mean:.2f}% max {100 * strain.max():.2f}%  "
               f"finite {np.isfinite(P).all()}  ({time.time() - t0:.1f}s wall)", flush=True)
-    if not np.isfinite(P).all():
-        print("DIVERGED"); break
 
 # ---- viewer ----
-rp = rec.rope_array()  # [F, N, V, 3]
+rp = rec.rope_array(frames)  # [F, N, V, 3]
 F = rp.shape[0]
 COLORS = ["#e4572e", "#17bebb", "#ffc914", "#2e86de"]
 scene = {
