@@ -19,7 +19,7 @@ PhysX inside NVIDIA Isaac Lab. It is the GPU engine of
 | Contact (opt-in) | Half-space planes; rope-rope contact; meshes as signed-distance grids (baked with Warp or from closed forms), including kinematic meshes whose pose is set every frame; per-vertex contact forces and per-mesh wrenches; up to 64 meshes with a per-vertex broad phase |
 | `ropesim.isaac_bridge` | PhysX rigid bodies and articulation links become rope colliders; the rope's wrench goes back to PhysX as an external force (explicit coupling). Its demos, and the robot-arm RL task, live in [DeformX](https://github.com/DeformX/DeformX) |
 | Air drag | Linear decay plus quadratic cross-flow drag split along the segment tangent |
-| `tests/` | 124 tests against analytic ground truth (hanging elongation = EA, cantilever droop = EI, pendulum period, energy, convergence, every contact law); measured baselines in [tests/README.md](tests/README.md) |
+| `tests/` | Analytic checks for stretch, bending, dynamics and contact, plus deterministic replay and example CLI checks. See the measured baselines in [tests/README.md](tests/README.md). |
 
 The solver source is vendored under `third_party/yarnball/` (headless subset, GPL-3.0,
 local patches listed in [VENDOR.md](third_party/yarnball/VENDOR.md)); `csrc/` holds the
@@ -31,16 +31,18 @@ validation suite, `examples/` runnable scripts and `docs/` the solver notes.
 
 - Linux, an NVIDIA GPU, and a CUDA toolkit that matches the torch build you use
   (torch `cu128` ↔ CUDA 12.8). CMake ≥ 3.24, Ninja, a C++17 compiler, OpenMP, and the
-  header-only [glm](https://github.com/g-truc/glm) (`apt install libglm-dev` or `conda install glm`).
+  header-only [GLM](https://github.com/g-truc/glm). The release candidate was tested with
+  GLM 0.9.9.8. Set `GLM_INCLUDE_DIR` to the directory containing `glm/glm.hpp`.
 - Python ≥ 3.10 with `numpy`; `torch` (CUDA build) to use `RopeBatch` tensors; optional
   `warp-lang` to bake triangle meshes (`pip install -e ".[bake]"`); Isaac Lab 2.x for the bridge.
 
 ## Install
 
 ```bash
-export CUDACXX=/usr/local/cuda-12.8/bin/nvcc          # the toolkit that matches your torch
-pip install -e .                                       # builds the vendored solver + module (about a minute)
-pytest                                                 # 124 tests, a few minutes on one GPU
+export CUDACXX=/usr/local/cuda-12.8/bin/nvcc          # use the toolkit that matches PyTorch
+export GLM_INCLUDE_DIR=/path/to/glm-0.9.9.8
+python -m pip install -e ".[dev]"                    # builds the vendored solver and installs pytest
+python -m pytest                                    # full suite takes a few minutes on one GPU
 ```
 
 The GPU architecture defaults to the build machine's GPU. For a binary that runs on several

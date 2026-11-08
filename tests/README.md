@@ -1,7 +1,7 @@
 # ropesim validation suite
 
-Physics-grounded validation of the wrapped, de-collisioned YarnBall Cosserat solver:
-124 tests, one of them a strict expected failure that guards the measured stiffness limit.
+The suite validates the wrapped YarnBall Cosserat solver and the example entry points.
+One strict expected failure guards the measured stiffness limit.
 
 ```bash
 pip install -e .                      # rebuild after any csrc/ or third_party/ change
@@ -20,6 +20,7 @@ pytest tests/test_statics.py -k elongation
 | `test_mesh_motion.py` | kinematic (moving) meshes: interpolation, moving-surface friction, teleport, force readout | torch |
 | `test_mesh_broadphase.py` | 64 meshes, candidate lists, per-mesh friction, CUDA-tensor targets, device views, review-3 regressions | torch |
 | `test_isaac_bridge_geometry.py` | the Kit-free half of the Isaac bridge: tessellated primitives, welding, shells, fillets | warp (skips otherwise) |
+| `test_showcase_cli.py` | divergence exits before writing a replay and the hand exporter accepts paths relative to the working directory | torch, trimesh and scipy |
 
 The Isaac Lab half of the bridge has no pytest (one Kit per process, minutes to start); its
 integration checks are the scripts `scripts/isaac_bridge_demo.py` (momentum balance, dragged box,
