@@ -38,12 +38,24 @@ validation suite, `examples/` runnable scripts and `docs/` the solver notes.
 
 ## Install
 
+Set the toolkit path to the CUDA installation that matches PyTorch. Add its runtime
+libraries to the loader path before importing `ropesim`. This CUDA 12.8 example installs
+the matching PyTorch build, which the test suite requires.
+
 ```bash
-export CUDACXX=/usr/local/cuda-12.8/bin/nvcc          # use the toolkit that matches PyTorch
+export CUDA_TOOLKIT_ROOT=/usr/local/cuda-12.8
+export CUDACXX="$CUDA_TOOLKIT_ROOT/bin/nvcc"
+export LD_LIBRARY_PATH="$CUDA_TOOLKIT_ROOT/lib64:$CUDA_TOOLKIT_ROOT/targets/x86_64-linux/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export GLM_INCLUDE_DIR=/path/to/glm-0.9.9.8
-python -m pip install -e ".[dev]"                    # builds the vendored solver and installs pytest
-python -m pytest                                    # full suite takes a few minutes on one GPU
+python -m pip install torch==2.7.0 --index-url https://download.pytorch.org/whl/cu128
+python -m pip install -e ".[dev,bake]" trimesh scipy
+python -c 'import ropesim; import torch; print(ropesim._ropesim.__file__); print(torch.cuda.get_device_name())'
+python -m pytest  # full suite takes a few minutes on one GPU
 ```
+
+The `bake` extra installs Warp. The mesh and showcase checks use Warp, Trimesh and
+SciPy. To omit these optional dependencies, install `.[dev]` instead. Tests that
+need the optional packages will skip when they are absent.
 
 The GPU architecture defaults to the build machine's GPU. For a binary that runs on several
 GPUs, or on a machine without one at build time:
